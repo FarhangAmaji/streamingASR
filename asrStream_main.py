@@ -32,6 +32,9 @@ class SpeechToTextTranscriber:
                  language="en",
                  commonFalseDetectedWords=None,  # New parameter
                  loudnessThresholdOf_commonFalseDetectedWords=2.4,
+                 debugPrint=False,
+                 recordingToggleKey="win+alt+l",
+                 outputToggleKey="q",
                  ):
 
         # Audio recording parameters
@@ -60,6 +63,10 @@ class SpeechToTextTranscriber:
             "recordingOff": str(self.scriptDir / "recordingOff.mp3"),
             "recordingOn": str(self.scriptDir / "recordingOn.mp3")
         }
+
+        self.debugPrint = debugPrint
+        self.recordingToggleKey = recordingToggleKey
+        self.outputToggleKey = outputToggleKey
 
         # Initialize pygame for audio playback
         pygame.mixer.init()
@@ -103,7 +110,8 @@ class SpeechToTextTranscriber:
     def loadModel(self):
         """Load the ASR model to GPU"""
         if not self.modelLoaded:
-            print("Loading model to GPU...")
+            if self.debugPrint:
+                print("Loading model to GPU...")
             self.asr = pipeline("automatic-speech-recognition",
                                 model=self.modelName,
                                 generate_kwargs={"language": self.language},
@@ -113,7 +121,8 @@ class SpeechToTextTranscriber:
             # Warm up the model
             dummyAudio = np.zeros(self.sampleRate, dtype=np.float32)  # 1 second of silence
             self.asr({"raw": dummyAudio, "sampling_rate": self.sampleRate})  # Corrected for API
-            print("Model loaded and warmed up")
+            if self.debugPrint:
+                print("Model loaded and warmed up")
 
     def unloadModel(self):
         """Unload the ASR model from GPU"""
@@ -162,12 +171,12 @@ class SpeechToTextTranscriber:
         startTime = time.time()
 
         while self.isProgramActive and (time.time() - startTime) < self.maxDuration_programActive:
-            if keyboard.is_pressed('win+alt+l'):
+            if keyboard.is_pressed(self.recordingToggleKey):
                 # Toggle recording state
                 self.isRecordingActive = not self.isRecordingActive
 
                 if self.isRecordingActive:
-                    print("Recording started...")
+                    print("Recording started...")  # Keep this print regardless of debugPrint
                     self.playNotification("recordingOn")
                     # Reset the program timer when recording starts
                     startTime = time.time()
@@ -176,23 +185,23 @@ class SpeechToTextTranscriber:
                     if not self.modelLoaded:
                         self.loadModel()
                 else:
-                    print("Recording stopped...")
+                    print("Recording stopped...")  # Keep this print regardless of debugPrint
                     self.playNotification("recordingOff")
 
                 # Wait for key release to prevent multiple triggers
-                while keyboard.is_pressed('win+alt+l'):
+                while keyboard.is_pressed(self.recordingToggleKey):
                     time.sleep(0.1)
 
-            if keyboard.is_pressed('q'):
+            if keyboard.is_pressed(self.outputToggleKey):
                 self.toggleOutput()
                 # Wait for key release to prevent multiple triggers
-                while keyboard.is_pressed('q'):
+                while keyboard.is_pressed(self.outputToggleKey):
                     time.sleep(0.1)
 
             time.sleep(0.1)
 
         self.isProgramActive = False
-        print("Program timeout reached. Exiting...")
+        print("Program timeout reached. Exiting...")  # Keep this print regardless of debugPrint
 
     def modelManager(self):
         """Monitor model usage and unload when inactive for too long"""
@@ -273,7 +282,6 @@ class SpeechToTextTranscriber:
             currentTime = time.time()
             if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval and len(
                     self.audioBuffer) > 0:
-                print("Transcribing audio buffer...")
                 try:
                     # Ensure model is loaded before transcription
                     if not self.modelLoaded:
@@ -284,7 +292,8 @@ class SpeechToTextTranscriber:
 
                     # Calculate and store the loudness sum
                     loudnessSum = np.sum(np.abs(self.audioBuffer))
-                    print(f"Sum of loudness for audio buffer: {loudnessSum}")
+                    if self.debugPrint:
+                        print(f"Sum of loudness for audio buffer: {loudnessSum}")
 
                     # Apply noise reduction to the audio buffer
                     reducedNoiseAudio = nr.reduce_noise(
@@ -299,7 +308,6 @@ class SpeechToTextTranscriber:
                         "raw": reducedNoiseAudio,
                         "sampling_rate": self.actualSampleRate
                     })["text"]
-                    print("Transcription:", transcription)
 
                     # Pass loudnessSum to handleTranscriptionOutput
                     self.handleTranscriptionOutput(transcription, loudnessSum)
@@ -322,31 +330,42 @@ class SpeechToTextTranscriber:
         # Check if the transcription is empty or just periods
         isEmpty = not cleanedText or cleanedText == "."
 
-        # Check if the transcription is a common false detection with low loudness
-        isFalseDetection = (
-                cleanedText in [word.lower() for word in self.commonFalseDetectedWords]
-                and loudnessSum < loudnessThreshold
-        )
+        # Check if the transcription is in the common false detection list
+        isInFalseDetectionList = cleanedText in [word.lower() for word in
+                                                 self.commonFalseDetectedWords]
+
+        # Check if the loudness is below threshold
+        isBelowThreshold = loudnessSum < loudnessThreshold
+
+        # Determine if this is a false detection
+        isFalseDetection = isInFalseDetectionList and isBelowThreshold
+
+        # Print when word is in false detection list but above threshold
+        if isInFalseDetectionList and not isBelowThreshold:
+            print(
+                f"Potential false detection but above threshold: '{cleanedText}'. Loudness: {loudnessSum}, Threshold: {loudnessThreshold}")
 
         if isEmpty or isFalseDetection:
             # Increment empty transcription count
             self.emptyTranscriptionCount += 1
             maxEmptyTranscriptions = math.ceil(
                 self.consecutiveIdleTime / self.transcriptionInterval)
-            print(
-                f"Empty transcription detected"
-                f"({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})"
-            )
+            if self.debugPrint:
+                print(
+                    f"Empty transcription detected"
+                    f"({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})"
+                )
 
             # Check if we've reached the maximum number of empty transcriptions
             if self.emptyTranscriptionCount >= maxEmptyTranscriptions:
                 print(
-                    f"Reached {self.consecutiveIdleTime} seconds of silence, stopping recording...")
+                    f"Reached {self.consecutiveIdleTime} seconds of silence, stopping recording..."
+                )
                 self.stopRecording()
                 self.recordingStartTime = 0
                 self.emptyTranscriptionCount = 0
         else:
-            print("Transcription:", transcription)
+            print("Transcription:", transcription)  # Always print this regardless of debugPrint
             # Valid transcription
             if self.outputEnabled:
                 # Restore original case and formatting for output
@@ -431,7 +450,7 @@ if __name__ == "__main__":
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
             model_unloadTimeout=5 * 60,  # Unload after 5 minutes
-            consecutiveIdleTime=100,  # Stop after 20 seconds of silence
+            consecutiveIdleTime=40,  # Stop after 20 seconds of silence
             isRecordingActive=True,  # Start with recording off
             outputEnabled=False,  # Start with output off
             sampleRate=16000,  # Higher sample rate
