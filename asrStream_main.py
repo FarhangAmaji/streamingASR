@@ -1,3 +1,4 @@
+import gc
 import math
 import os
 import queue
@@ -112,28 +113,51 @@ class SpeechToTextTranscriber:
         if not self.modelLoaded:
             if self.debugPrint:
                 print("Loading model to GPU...")
+
+            # Force garbage collection before loading
+            self.monitorMemory()
+            self.cudaClean()
+
+            # Load the model with specific configuration
             self.asr = pipeline("automatic-speech-recognition",
                                 model=self.modelName,
                                 generate_kwargs={"language": self.language},
-                                # Explicitly set language to English
                                 device=self.device)
             self.modelLoaded = True
+
             # Warm up the model
             dummyAudio = np.zeros(self.sampleRate, dtype=np.float32)  # 1 second of silence
-            self.asr({"raw": dummyAudio, "sampling_rate": self.sampleRate})  # Corrected for API
-            if self.debugPrint:
-                print("Model loaded and warmed up")
+            self.asr({"raw": dummyAudio, "sampling_rate": self.sampleRate})
+
+            self.monitorMemory()
 
     def unloadModel(self):
         """Unload the ASR model from GPU"""
         if self.modelLoaded:
-            print("Unloading model from GPU...")
+            if self.debugPrint:
+                print("Unloading model from GPU...")
+
+            # Delete the model and pipeline
+            del self.asr
             self.asr = None
-            torch.cuda.empty_cache()  # Free GPU memory
-            # This frees up GPU memory that was allocated by PyTorch in this process and doesn't interrupt my other codes or other programmes which use gpu
+
+            self.cudaClean()
+
             self.modelLoaded = False
             self.playNotification("modelUnloaded")
-            print("Model unloaded from GPU")
+            self.monitorMemory()
+
+    def cudaClean(self):
+        # Force garbage collection
+        gc.collect()
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+            # Additional forceful memory cleanup
+            with torch.no_grad():
+                torch.cuda.synchronize()
 
     def audioCallback(self, inData, frames, time, status):
         """Callback function for audio stream."""
@@ -165,6 +189,13 @@ class SpeechToTextTranscriber:
         self.isRecordingActive = False
         self.playNotification("recordingOff")
         print("Recording stopped...")
+
+    def monitorMemory(self):
+        """Monitor GPU memory usage"""
+        if torch.cuda.is_available() and self.debugPrint:
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+            print(f"GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
 
     def monitorKeyboardShortcuts(self):
         """Monitor keyboard shortcuts."""
@@ -449,12 +480,13 @@ if __name__ == "__main__":
             loudnessThresholdOf_commonFalseDetectedWords=20,
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
-            model_unloadTimeout=5 * 60,  # Unload after 5 minutes
-            consecutiveIdleTime=40,  # Stop after 20 seconds of silence
+            model_unloadTimeout=1 * 60,  # Unload after 5 minutes
+            consecutiveIdleTime=20,  # Stop after 20 seconds of silence
             isRecordingActive=True,  # Start with recording off
             outputEnabled=False,  # Start with output off
             sampleRate=16000,  # Higher sample rate
-            channels=1
+            channels=1,
+            debugPrint=True
         )
 
         # Use default input device
