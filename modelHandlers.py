@@ -16,7 +16,8 @@
 import abc  # Abstract Base Classes
 import gc
 import json
-import logging  # Needed for checking log level
+import \
+    logging  # Retained for logging.DEBUG constant in _monitorMemory if a direct check is preferred
 import time
 import traceback  # For detailed error logging
 
@@ -41,8 +42,9 @@ try:
 except ImportError:
     huggingface_hub = None
     hfHubAvailable = False
+
 # Import logging helpers from utils
-from utils import logWarning, logDebug, logInfo, logError
+from utils import logWarning, logDebug, logInfo, logError, logCritical  # Added logCritical
 
 
 # ==================================
@@ -124,8 +126,9 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         super().__init__(config)
         # Check for dependencies
         if not transformersAvailable or not torch:
-            logError("CRITICAL: WhisperModelHandler requires 'transformers' and 'torch' libraries.")
-            logError("Please install them: pip install torch transformers")
+            # Changed to logCritical
+            logCritical(
+                "WhisperModelHandler requires 'transformers' and 'torch' libraries. Please install them: pip install torch transformers")
             # Set internal state to prevent operations
             self.asrPipeline = None
             self.device = None
@@ -173,19 +176,22 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         logDebug("CUDA memory cleaning attempt finished (Whisper Handler).")
 
     def _monitorMemory(self):
-        """Logs current GPU memory usage if DEBUG level is enabled."""
-        # Check if the logger is configured to output DEBUG messages
-        if logging.getLogger("SpeechToTextApp").isEnabledFor(logging.DEBUG):
-            if self.device and self.device.type == 'cuda':
-                try:
-                    allocated = torch.cuda.memory_allocated(self.device) / (
-                            1024 ** 3)  # Convert bytes to GB
-                    reserved = torch.cuda.memory_reserved(self.device) / (
-                            1024 ** 3)  # Convert bytes to GB
-                    logDebug(
-                        f"GPU Memory (Whisper, Device {self.device}) - Allocated: {allocated:.3f} GB, Reserved: {reserved:.3f} GB")
-                except Exception as e:
-                    logWarning(f"Failed to get GPU memory stats: {e}")
+        """Logs current GPU memory usage. Relies on DynamicLogger's config to show/hide DEBUG logs."""
+        # The check `if logging.getLogger("SpeechToTextApp").isEnabledFor(logging.DEBUG):`
+        # is removed because `logDebug.levelEquivalent` caused an AttributeError.
+        # Now, we simply call logDebug and let DynamicLogger decide if it should be displayed
+        # based on the active configuration.
+        if self.device and self.device.type == 'cuda':
+            try:
+                allocated = torch.cuda.memory_allocated(self.device) / (
+                        1024 ** 3)  # Convert bytes to GB
+                reserved = torch.cuda.memory_reserved(self.device) / (
+                        1024 ** 3)  # Convert bytes to GB
+                # This logDebug call will be subject to DynamicLogger's filtering.
+                logDebug(
+                    f"GPU Memory (Whisper, Device {self.device}) - Allocated: {allocated:.3f} GB, Reserved: {reserved:.3f} GB")
+            except Exception as e:
+                logWarning(f"Failed to get GPU memory stats: {e}")
 
     def loadModel(self) -> bool:
         """Loads the Whisper ASR model pipeline locally."""
@@ -194,14 +200,15 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             return True  # Already loaded
         # Ensure dependencies are available (checked in __init__, but double-check)
         if not transformersAvailable or not torch or pipeline is None or AutoConfig is None:
-            logError("Cannot load Whisper model: Missing required libraries (transformers/torch).")
+            logCritical(
+                "Cannot load Whisper model: Missing required libraries (transformers/torch).")
             return False
         modelName = self.config.get('modelName')
         if not modelName:
-            logError("Cannot load Whisper model: 'modelName' not specified in config.")
+            logCritical("Cannot load Whisper model: 'modelName' not specified in config.")
             return False
         if self.device is None:
-            logError("Cannot load Whisper model: Compute device not determined.")
+            logCritical("Cannot load Whisper model: Compute device not determined.")
             return False
         logInfo(f"Loading local Whisper model '{modelName}' to device '{self.device}'...")
         self._monitorMemory()  # Memory before load
@@ -240,8 +247,8 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                 f"Whisper model '{modelName}' loaded successfully locally on {self.device} in {loadTime:.2f}s.")
             self._warmUpModel()  # Warm up the model after successful load
         except Exception as e:
-            logError(f"Failed loading local Whisper model '{modelName}': {e}")
-            logError(traceback.format_exc())  # Log full traceback
+            logCritical(f"Failed loading local Whisper model '{modelName}': {e}", exc_info=True)
+            logError(traceback.format_exc())  # Keep explicit traceback for this critical failure
             logError(
                 "Hints: Check model name, internet connection (for first download), dependencies (transformers, torch, maybe accelerate), and available memory (RAM/VRAM).")
             # More specific error hints
@@ -336,7 +343,8 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                 else:
                     audioData = audioData.astype(np.float32)
             except Exception as e:
-                logError(f"Failed to convert audio data to float32: {e}")
+                logError(f"Failed to convert audio data to float32: {e}",
+                         exc_info=True)  # Added exc_info
                 return None  # Cannot proceed without correct dtype
         # Check sample rate - Whisper models are typically trained on 16kHz.
         # The Transformers pipeline *should* handle resampling automatically.
@@ -374,8 +382,8 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             transcription = transcription.strip() if transcription else ""
             logDebug(f"Whisper transcription result (stripped): '{transcription[:150]}...'")
         except Exception as e:
-            logError(f"Error during local Whisper transcription: {e}")
-            logError(traceback.format_exc())
+            logError(f"Error during local Whisper transcription: {e}", exc_info=True)
+            logError(traceback.format_exc())  # Keep explicit traceback for this error
             transcription = None  # Indicate critical failure
             # Attempt to clean GPU memory if a CUDA error occurred
             if self.device and self.device.type == 'cuda' and 'cuda' in str(e).lower():
@@ -426,8 +434,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         super().__init__(config)
         self.serverUrl = config.get('wslServerUrl')
         if not self.serverUrl:
-            logError(
-                "CRITICAL: RemoteNemoClientHandler cannot operate: 'wslServerUrl' not found in configuration.")
+            logCritical(
+                "RemoteNemoClientHandler cannot operate: 'wslServerUrl' not found in configuration.")
             # Mark as not functional
             self.serverReachable = False
             self.modelLoaded = False
@@ -463,8 +471,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         # Construct full URL, ensuring no double slashes
         url = f"{self.serverUrl.rstrip('/')}/{endpoint.lstrip('/')}"
         # Get configured timeouts, provide defaults using camelCase keys
-        connectTimeout = self.config.get('serverConnectTimeout', 5.0)  # Default added
-        readTimeout = self.config.get('serverRequestTimeout', 15.0)  # Keep existing key
+        connectTimeout = self.config.get('serverConnectTimeout', 5.0)
+        readTimeout = self.config.get('serverRequestTimeout', 15.0)
         requestTimeout = (connectTimeout, readTimeout)
         logDebug(f"Sending {method.upper()} request to server: {url} (Timeout: {requestTimeout}s)")
         try:
@@ -667,8 +675,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
             try:
                 # Perform robust conversion (handle int types)
                 if audioData.dtype.kind in ('i', 'u'):
-                    maxValue = np.iinfo(audioData.dtype).max  # Use camelCase
-                    minValue = np.iinfo(audioData.dtype).min  # Use camelCase
+                    maxValue = np.iinfo(audioData.dtype).max
+                    minValue = np.iinfo(audioData.dtype).min
                     if maxValue > minValue:
                         audioData = (audioData.astype(np.float32) - minValue) / (
                                 maxValue - minValue) * 2.0 - 1.0
@@ -677,7 +685,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
                 else:
                     audioData = audioData.astype(np.float32)
             except Exception as e:
-                logError(f"Failed to convert audio data to float32 for sending: {e}")
+                logError(f"Failed to convert audio data to float32 for sending: {e}",
+                         exc_info=True)  # Added exc_info
                 return None  # Cannot proceed
         audioBytes = audioData.tobytes()
         if not audioBytes:

@@ -28,9 +28,11 @@ except Exception as e:  # Catch other potential init errors
     sd = None
     sounddeviceAvailable = False
     # Log error here as logger might not be set up yet in main module
+    # This print remains as it's for a very early, critical dependency failure.
     print(f"ERROR: Failed to import or initialize sounddevice: {e}", file=sys.stderr)
+
 # Import logging helpers from utils
-from utils import logWarning, logDebug, logInfo, logError
+from utils import logWarning, logDebug, logInfo, logError, logCritical
 
 
 # ==================================
@@ -47,8 +49,9 @@ class AudioHandler:
         self.streamInfo = {}  # Store info about the active stream
         # Check dependency and perform initial device setup
         if not sounddeviceAvailable:
-            logError(
-                "CRITICAL: sounddevice library not found or failed to initialize. Audio input disabled.")
+            # Using logCritical for critical dependency failures
+            logCritical(
+                "sounddevice library not found or failed to initialize. Audio input disabled.")
             # Optionally raise error to prevent app start without audio
             # raise ImportError("sounddevice library is required for audio input.")
         else:

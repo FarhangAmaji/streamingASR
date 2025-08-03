@@ -12,14 +12,14 @@
 #   and model lifecycle.
 # - Handles main application loop, state transitions, and cleanup.
 # ==============================================================================
-import logging
+# import logging # Replaced by importing logCritical from utils
 import os
 import platform
 import queue
 import subprocess
 import threading
 import time
-import traceback
+import traceback  # Retained for explicit traceback.format_exc()
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -30,7 +30,7 @@ from modelHandlers import WhisperModelHandler, RemoteNemoClientHandler
 from systemInteractions import SystemInteractionHandler
 from tasks import TranscriptionOutputHandler
 # Import logging helpers from utils
-from utils import logWarning, logDebug, convertWindowsPathToWsl, logInfo, logError
+from utils import logWarning, logDebug, convertWindowsPathToWsl, logInfo, logError, logCritical
 
 
 # ==================================
@@ -67,10 +67,15 @@ class SpeechToTextOrchestrator:
         self._initializeAsrHandler()  # Sets self.asrModelHandler and prepares self.wslLaunchCommand
         # Ensure ASR handler was successfully initialized before proceeding
         if not self.asrModelHandler:
+            # Using logCritical for this fatal startup error
+            logCritical(
+                "ASR Handler could not be initialized. Check configuration and logs. Cannot continue.")
             raise RuntimeError(
                 "ASR Handler could not be initialized. Check configuration and logs. Cannot continue.")
         # --- Instantiate Model Lifecycle Manager (depends on ASR Handler) ---
         if not self.systemInteractionHandler:
+            # Using logCritical for this fatal startup error
+            logCritical("SystemInteractionHandler not initialized before ModelLifecycleManager.")
             raise RuntimeError(
                 "SystemInteractionHandler not initialized before ModelLifecycleManager.")
         self.modelLifecycleManager = ModelLifecycleManager(
@@ -111,13 +116,14 @@ class SpeechToTextOrchestrator:
             self.wslServerProcess = None
             self.wslLaunchCommand = []
         else:
-            logError(
-                "CRITICAL: No 'modelName' specified in configuration. Cannot initialize ASR handler.")
+            # Using logCritical for this configuration error that prevents ASR from working
+            logCritical("No 'modelName' specified in configuration. Cannot initialize ASR handler.")
             self.asrModelHandler = None
         if self.asrModelHandler:
             logDebug(f"ASR Handler initialized: {type(self.asrModelHandler).__name__}")
         else:
-            logError("ASR Handler initialization failed.")
+            logError(
+                "ASR Handler initialization failed.")  # This implies modelName was likely empty
 
     def _prepareWslLaunchCommand(self, modelName):
         """Prepares the command list needed to launch the WSL NeMo server script."""
@@ -226,7 +232,7 @@ class SpeechToTextOrchestrator:
             self.wslLaunchCommand = []
         except Exception as e:
             logError(f"Unexpected error preparing WSL launch command: {type(e).__name__} - {e}")
-            logError(traceback.format_exc())
+            logError(traceback.format_exc())  # Retained for detailed error on this critical step
             logError("WSL server will NOT be launched automatically.")
             self.wslLaunchCommand = []
 
@@ -275,8 +281,8 @@ class SpeechToTextOrchestrator:
         logMessage += f"Unload Model Inactive:{unloadTimeoutStr}\n"
         logMessage += f"Program Auto-Exit:    {maxProgramStr}\n"
         logMessage += f"-------------------------"
-        # Log the entire block as one INFO message
-        logInfo(logMessage)
+        # Log the entire block as one INFO message, with an indicatorName
+        logInfo(logMessage, indicatorName="APP_SETUP_INFO")
 
     def _launchWslServer(self) -> bool:
         """
@@ -404,7 +410,7 @@ class SpeechToTextOrchestrator:
         except Exception as e:
             # Catch any other unexpected errors during Popen or initial setup
             logError(f"Unexpected error launching or monitoring WSL server process: {e}")
-            logError(traceback.format_exc())
+            logError(traceback.format_exc())  # Retained for detailed error on this critical step
             # If process was created but an error occurred after, try to terminate it
             if self.wslServerProcess and self.wslServerProcess.poll() is None:
                 logWarning("Terminating WSL process due to unexpected launch error.")
@@ -518,18 +524,11 @@ class SpeechToTextOrchestrator:
             stdoutData, _ = self.wslServerProcess.communicate(
                 timeout=2.0)  # Use a slightly longer timeout
             if stdoutData and stdoutData.strip():
-                logError(f"--- Captured WSL Server stdout/stderr (PID: {pid}) ---")
-                # Log line by line for better readability in logs
-                lines = stdoutData.strip().splitlines()
-                for i, line in enumerate(lines):
-                    # Limit number of lines logged directly if output is huge?
-                    # if i < 100:
-                    logError(f"WSL_OUT: {line}")
-                    # else:
-                    #    if i == 100: logError("WSL_OUT: ... (output truncated)")
-                    #    break
-                logError(f"--- End WSL Server output (PID: {pid}) ---")
-                # Check for common error indicators
+                # Using an indicatorName for the multi-line log output
+                logError(
+                    f"--- Captured WSL Server stdout/stderr (PID: {pid}) ---\n{stdoutData.strip()}",
+                    indicatorName="WSL_SUBPROCESS_OUTPUT")
+                # Check for common error indicators (can be done here or by parsing with the indicator in mind)
                 if "sudo: a password is required" in stdoutData:
                     logError(
                         "!!! Detected 'sudo password required' error. Automatic launch failed.")
@@ -557,9 +556,9 @@ class SpeechToTextOrchestrator:
             try:
                 remainingOutput = self.wslServerProcess.stdout.read()
                 if remainingOutput and remainingOutput.strip():
-                    logError(f"--- Fallback Read WSL Server stdout/stderr (PID: {pid}) ---")
-                    logError(remainingOutput.strip())
-                    logError(f"--- End Fallback Read WSL Server output (PID: {pid}) ---")
+                    logError(
+                        f"--- Fallback Read WSL Server stdout/stderr (PID: {pid}) ---\n{remainingOutput.strip()}",
+                        indicatorName="WSL_SUBPROCESS_OUTPUT_FALLBACK")
                     outputLogged = True
             except Exception as fallbackReadError:
                 logWarning(f"Fallback read for WSL process {pid} failed: {fallbackReadError}")
@@ -613,7 +612,8 @@ class SpeechToTextOrchestrator:
                 # Log output if process handle is still valid
                 self._logWslProcessOutputOnError()
             except Exception as e:
-                logError(f"Error during termination of WSL server process (PID: {pid}): {e}")
+                logError(f"Error during termination of WSL server process (PID: {pid}): {e}",
+                         exc_info=True)  # Added exc_info=True
                 # Attempt to log output even on termination error
                 self._logWslProcessOutputOnError()
         else:  # Process already finished before terminate was called
@@ -686,9 +686,10 @@ class SpeechToTextOrchestrator:
                 targetFunc(*args, **kwargs);
                 logDebug(f"Thread '{threadName}' finished normally.")
             except Exception as e:
-                logError(f"!!! EXCEPTION in thread '{threadName}': {e}", exc_info=True)
+                # Use logCritical for exceptions in threads, with exc_info
+                logCritical(f"!!! EXCEPTION in thread '{threadName}': {e}", exc_info=True)
                 if threadName in ["KeyboardMonitorThread", "TranscriptionWorkerThread"]:
-                    logCritical = getattr(logging, 'critical', logError)
+                    # This secondary logCritical is more of a status update, exc_info already logged
                     logCritical(f"Critical thread '{threadName}' failed, stopping program.");
                     self.stateManager.stopProgram()
             finally:
@@ -711,7 +712,8 @@ class SpeechToTextOrchestrator:
                 thread.start();
                 logDebug(f"Thread '{threadName}' initiated.")
             except Exception as e:
-                logError(f"Failed start thread '{threadName}': {e}");
+                logError(f"Failed start thread '{threadName}': {e}",
+                         exc_info=True);  # Keep exc_info here
                 failedThreads.append(
                     threadName)
         time.sleep(0.1);
@@ -722,9 +724,10 @@ class SpeechToTextOrchestrator:
         if failedThreads: logError(f"Failed threads: {', '.join(failedThreads)}")
         if activeThreadCount < expectedThreadCount: logWarning(
             "One or more threads exited immediately.")
-        if "KeyboardMonitorThread" not in [t.name for t in activeThreads]: logError(
+        # Using logCritical for failure of essential threads
+        if "KeyboardMonitorThread" not in [t.name for t in activeThreads]: logCritical(
             "Keyboard monitor failed. Hotkeys disabled.")
-        if "TranscriptionWorkerThread" not in [t.name for t in activeThreads]: logError(
+        if "TranscriptionWorkerThread" not in [t.name for t in activeThreads]: logCritical(
             "Transcription worker failed.")
 
     # --- Public Methods for Hotkey Actions ---
@@ -820,9 +823,9 @@ class SpeechToTextOrchestrator:
                     logError("Initial ASR model load/check failed.")
                     # Handle specific cases if needed
                     if isinstance(self.asrModelHandler, WhisperModelHandler):
-                        logError(
-                            "Critical: Local Whisper model failed to load. Check model name/path and dependencies.")
-                        logError("Aborting application start due to local model load failure.")
+                        # Changed to logCritical as this is a major failure for local setup
+                        logCritical(
+                            "Local Whisper model failed to load. Check model name/path and dependencies. Aborting application start.")
                         self.stateManager.stopProgram()
                         return  # Abort setup
                     elif isinstance(self.asrModelHandler, RemoteNemoClientHandler):
@@ -831,8 +834,12 @@ class SpeechToTextOrchestrator:
                 else:
                     logInfo("Initial ASR model load/check successful.")
             except Exception as e:
-                logError(f"Critical error during initial model load/check: {e}", exc_info=True)
-                logError("Aborting application start due to model load error.")
+                # Changed to logCritical for any exception during this critical phase
+                logCritical(
+                    f"Critical error during initial model load/check: {e}. Aborting application start.",
+                    exc_info=True)
+                logError(
+                    traceback.format_exc())  # Retained for detailed error on this critical step
                 self.stateManager.stopProgram()
                 return  # Abort setup
         else:
@@ -851,7 +858,8 @@ class SpeechToTextOrchestrator:
             logInfo("Initial state is recording: attempting to start audio stream...")
             initialStreamStarted = self.audioHandler.startStream()
             if not initialStreamStarted:
-                logError("CRITICAL: Failed to start audio stream initially. Recording disabled.")
+                # Changed to logCritical as inability to start audio is severe
+                logCritical("Failed to start audio stream initially. Recording disabled.")
                 self.stateManager.stopRecording()
         elif self.stateManager.shouldProgramContinue():
             logInfo("Initial state is not recording, audio stream will start when toggled on.")
@@ -933,7 +941,8 @@ class SpeechToTextOrchestrator:
         try:
             self._runInitialSetup()
             if not self.stateManager.shouldProgramContinue():
-                logError("Setup failed.")
+                logError(
+                    "Setup failed.")  # This implies a non-fatal setup issue where cleanup is still desired
             else:
                 initialSetupOk = True
             if initialSetupOk:
@@ -947,7 +956,9 @@ class SpeechToTextOrchestrator:
         except KeyboardInterrupt:
             logInfo("\nKeyboardInterrupt. Stopping...")
         except Exception as e:
-            logError(f"\n!!! CRITICAL MAIN LOOP ERROR: {e}", exc_info=True)
+            # Changed to logCritical for unexpected main loop errors
+            logCritical(f"\n!!! CRITICAL MAIN LOOP ERROR: {e}", exc_info=True)
+            logError(traceback.format_exc())  # Retained for detailed error on this critical step
         finally:
             if self.stateManager: self.stateManager.stopProgram()  # Ensure stop signal sent on exit
             logInfo("Exiting main loop." if initialSetupOk else "Exiting after setup failure.")
