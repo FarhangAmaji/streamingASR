@@ -1,12 +1,15 @@
 import math
+import os
 import queue
 import threading
 import time
+from pathlib import Path
 
 import keyboard
 import noisereduce as nr
 import numpy as np
 import pyautogui
+import pygame
 import sounddevice as sd
 import torch
 from transformers import pipeline
@@ -48,6 +51,19 @@ class SpeechToTextTranscriber:
         self.commonFalseDetectedWords = commonFalseDetectedWords if commonFalseDetectedWords else []
         self.loudnessThresholdOf_commonFalseDetectedWords = loudnessThresholdOf_commonFalseDetectedWords
 
+        # Audio notifications setup
+        self.scriptDir = Path(os.path.dirname(os.path.abspath(__file__)))
+        self.audio_files = {
+            "modelUnloaded": str(self.scriptDir / "modelUnloaded.mp3"),
+            "outputDisabled": str(self.scriptDir / "outputDisabled.mp3"),
+            "outputEnabled": str(self.scriptDir / "outputEnabled.mp3"),
+            "recordingOff": str(self.scriptDir / "recordingOff.mp3"),
+            "recordingOn": str(self.scriptDir / "recordingOn.mp3")
+        }
+
+        # Initialize pygame for audio playback
+        pygame.mixer.init()
+
         # Queue to store audio chunks
         self.audioQueue = queue.Queue()
 
@@ -75,6 +91,15 @@ class SpeechToTextTranscriber:
         devices = sd.query_devices()
         print(devices)
 
+    def playNotification(self, soundName):
+        """Play notification sound"""
+        if soundName in self.audio_files:
+            try:
+                sound = pygame.mixer.Sound(self.audio_files[soundName])
+                sound.play()
+            except Exception as e:
+                print(f"Error playing notification sound: {e}")
+
     def loadModel(self):
         """Load the ASR model to GPU"""
         if not self.modelLoaded:
@@ -98,6 +123,7 @@ class SpeechToTextTranscriber:
             torch.cuda.empty_cache()  # Free GPU memory
             # This frees up GPU memory that was allocated by PyTorch in this process and doesn't interrupt my other codes or other programmes which use gpu
             self.modelLoaded = False
+            self.playNotification("modelUnloaded")
             print("Model unloaded from GPU")
 
     def audioCallback(self, inData, frames, time, status):
@@ -110,6 +136,10 @@ class SpeechToTextTranscriber:
     def toggleOutput(self):
         """Toggle output when 'q' is pressed."""
         self.outputEnabled = not self.outputEnabled
+        if self.outputEnabled:
+            self.playNotification("outputEnabled")
+        else:
+            self.playNotification("outputDisabled")
         print(f"Output {'enabled' if self.outputEnabled else 'disabled'}")
 
     def startRecording(self):
@@ -124,6 +154,7 @@ class SpeechToTextTranscriber:
     def stopRecording(self):
         """Stop recording."""
         self.isRecordingActive = False
+        self.playNotification("recordingOff")
         print("Recording stopped...")
 
     def monitorKeyboardShortcuts(self):
@@ -137,6 +168,7 @@ class SpeechToTextTranscriber:
 
                 if self.isRecordingActive:
                     print("Recording started...")
+                    self.playNotification("recordingOn")
                     # Reset the program timer when recording starts
                     startTime = time.time()
                     self.lastActivityTime = time.time()
@@ -145,6 +177,7 @@ class SpeechToTextTranscriber:
                         self.loadModel()
                 else:
                     print("Recording stopped...")
+                    self.playNotification("recordingOff")
 
                 # Wait for key release to prevent multiple triggers
                 while keyboard.is_pressed('win+alt+l'):
@@ -318,7 +351,7 @@ class SpeechToTextTranscriber:
             if self.outputEnabled:
                 # Restore original case and formatting for output
                 outputText = transcription.rstrip('.') if self.removeTrailingDots else transcription
-                outputText = outputText + " "
+                outputText = outputText.lstrip(" ") + " "
 
                 ctrl_was_pressed = keyboard.is_pressed('ctrl')  # Check if Ctrl is pressed
                 if not ctrl_was_pressed:
@@ -393,7 +426,7 @@ if __name__ == "__main__":
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
             transcriptionInterval=1,  # Longer interval between transcriptions
-            commonFalseDetectedWords=["you", "thank you", "bye", "amen"],
+            commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=20,
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
