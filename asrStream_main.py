@@ -24,7 +24,7 @@ class SpeechToTextTranscriber:
                  outputEnabled=False,
                  sampleRate=16000,
                  channels=1,
-                 ):
+                 audio_threshold=0.01):
 
         # Audio recording parameters
         self.sampleRate = sampleRate
@@ -36,6 +36,7 @@ class SpeechToTextTranscriber:
         self.consecutiveIdleTime = consecutiveIdleTime
         self.model_unloadTimeout = model_unloadTimeout
         self.modelName = modelName
+        self.audio_threshold = audio_threshold
 
         # Queue to store audio chunks
         self.audioQueue = queue.Queue()
@@ -207,7 +208,17 @@ class SpeechToTextTranscriber:
             audioChunk = self.audioQueue.get()
             if self.actualChannels > 1:
                 audioChunk = np.mean(audioChunk, axis=1)  # Convert stereo to mono
-            self.audioBuffer = np.concatenate((self.audioBuffer, audioChunk.flatten()))
+
+            # Flatten and calculate RMS
+            audioChunk = audioChunk.flatten()
+            rms = np.sqrt(np.mean(np.square(audioChunk)))
+
+            # Only keep chunks above threshold
+            if rms >= self.audio_threshold:
+                self.audioBuffer = np.concatenate((self.audioBuffer, audioChunk))
+                print(f"chunk filtered (RMS: {rms:.4f})")
+            # else:
+            # print(f"Silent chunk filtered (RMS: {rms:.4f})")
 
     def handleRecordingTiming(self):
         """Handle recording session timing"""
@@ -353,7 +364,8 @@ if __name__ == "__main__":
             isRecordingActive=True,  # Start with recording off
             outputEnabled=False,  # Start with output off
             sampleRate=16000,  # Higher sample rate
-            channels=1
+            channels=1,
+            audio_threshold=0.0008
         )
 
         # Use default input device
