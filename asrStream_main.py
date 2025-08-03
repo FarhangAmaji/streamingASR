@@ -225,35 +225,44 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         Args:
             modelName (str): Name of the Whisper model to use
-            transcriptionInterval (int): Interval for transcription processing
-            maxDuration_recording (int): Maximum duration for a single recording session
-            maxDuration_programActive (int): Maximum duration for program activity
-            model_unloadTimeout (int): Timeout for unloading model when inactive
-            consecutiveIdleTime (int): Time of silence before stopping recording
-            isRecordingActive (bool): Initial recording state
-            isProgramActive (bool): Initial program state
-            outputEnabled (bool): Initial output state
-            sampleRate (int): Audio sample rate
-            channels (int): Number of audio channels
-            removeTrailingDots (bool): Whether to remove trailing dots from transcriptions
-            language (str): Language code for transcription
-            commonFalseDetectedWords (list): List of commonly falsely detected words
-            loudnessThresholdOf_commonFalseDetectedWords (float): Loudness threshold for false detection
-            debugPrint (bool): Enable debug printing for memory monitoring
-            recordingToggleKey (str): Key combination to toggle recording
-            outputToggleKey (str): Key to toggle output
+            transcriptionInterval (int): Interval for transcription processing (constantInterval mode)
+            busyContinuousTime (float): Duration of silence required after speech to trigger
+                                        transcription (busyContinuous mode).
+            transcriptionMode (str): "constantInterval" or "busyContinuous".
+            maxDuration_recording (int): Maximum duration for a single recording session (seconds).
+            maxDuration_programActive (int): Maximum duration for program activity (seconds).
+            model_unloadTimeout (int): Timeout for unloading model when inactive (seconds).
+            consecutiveIdleTime (int): Time of effective silence before stopping recording (seconds).
+            isRecordingActive (bool): Initial recording state.
+            isProgramActive (bool): Initial program state.
+            outputEnabled (bool): Initial output state (typing transcription).
+            sampleRate (int): Audio sample rate (Hz).
+            lowLoudnessSkip_threshold (float): Average loudness threshold below which transcription
+                                                of a segment is skipped.
+            busyContinuousSilenceThreshold (float): Average loudness threshold below which an incoming
+                                                    audio chunk is considered silent (busyContinuous mode).
+            channels (int): Number of audio channels (1 for mono, 2 for stereo).
+            removeTrailingDots (bool): Whether to remove trailing dots from transcriptions.
+            language (str): Language code for transcription (e.g., "en", "es").
+            commonFalseDetectedWords (list): List of commonly falsely detected words to filter.
+            loudnessThresholdOf_commonFalseDetectedWords (float): Average loudness threshold below which
+                                                                  common false words are ignored.
+            playEnableSounds (bool): Allow playing sounds for enabling actions (recording on, output on).
+            debugPrint (bool): Enable detailed debug printing.
+            recordingToggleKey (str): Key combination to toggle recording (e.g., "win+alt+l").
+            outputToggleKey (str): Key combination to toggle text output (e.g., "ctrl+q").
         """
         super().__init__(modelName=modelName,
                          language=language,
                          removeTrailingDots=removeTrailingDots,
                          debugPrint=debugPrint)
 
-        self.transcriptionMode = transcriptionMode  # "constantInterval" | "busyContinuous"
-        self.busyContinuousTime = busyContinuousTime  # seconds to look-back for silence
+        self.transcriptionMode = transcriptionMode
+        self.busyContinuousTime = busyContinuousTime
 
         self.sampleRate = sampleRate
         self.channels = channels
-        self.blockSize = 1024  # Number of frames per block
+        self.blockSize = 1024  # Number of frames per block (affects callback frequency)
         self.transcriptionInterval = transcriptionInterval
         self.maxDurationRecording = maxDuration_recording
         self.maxDurationProgramActive = maxDuration_programActive
@@ -273,33 +282,46 @@ class SpeechToTextTranscriber(BaseTranscriber):
             "recordingOff": str(self.scriptDir / "recordingOff.mp3"),
             "recordingOn": str(self.scriptDir / "recordingOn.mp3")
         }
+        for name, path in self.audioFiles.items():
+            if not Path(path).is_file():
+                print(f"Warning: Notification sound file not found: {path}")
+        try:
+            pygame.mixer.init()
+        except pygame.error as e:
+            print(f"Warning: Failed to initialize pygame mixer: {e}. Notification sounds disabled.")
+            self.audioFiles = {}  # Clear the dict so playNotification does nothing
 
         self.recordingToggleKey = recordingToggleKey
         self.outputToggleKey = outputToggleKey
         self.playEnableSounds = playEnableSounds
         self.enablingSounds = {"outputEnabled", "recordingOn"}
 
-        pygame.mixer.init()
-
         self.audioQueue = queue.Queue()
 
         self.isRecordingActive = isRecordingActive
         self.isProgramActive = isProgramActive
         self.outputEnabled = outputEnabled
-        self.lastActivityTime = time.time()
+        self.lastActivityTime = time.time()  # Used for model unloading timeout
 
-        self.audioBuffer = np.array([], dtype=np.float32)
-        self.emptyTranscriptionCount = 0
-        self.recordingStartTime = 0
-        self.lastTranscriptionTime = 0
-        self.actualSampleRate = self.sampleRate
-        self.actualChannels = self.channels
+        self.audioBuffer = np.array([], dtype=np.float32)  # Main buffer for accumulating audio
+        self.emptyTranscriptionCount = 0  # Used previously, might be redundant now
+        self.recordingStartTime = 0  # Timestamp when current recording session started
+        self.lastTranscriptionTime = 0  # Timestamp of the last transcription event
+        self.actualSampleRate = self.sampleRate  # Will be updated in setupDeviceInfo
+        self.actualChannels = self.channels  # Will be updated in setupDeviceInfo
 
         self.lastValidTranscriptionTime = time.time()
 
-        print("Available audio devices:")
-        devices = sd.query_devices()
-        print(devices)
+        self.currently_speaking = False  # Flag: Is speech currently being detected?
+        self.silence_start_time = None  # Timestamp: When did silence start after speech ended?
+
+        print("--- Available Audio Devices ---")
+        try:
+            devices = sd.query_devices()
+            print(devices)
+        except Exception as e:
+            print(f"Could not query audio devices: {e}")
+        print("-----------------------------")
 
     def playNotification(self, soundName):
         if not self.playEnableSounds and soundName in self.enablingSounds:
@@ -331,11 +353,17 @@ class SpeechToTextTranscriber(BaseTranscriber):
         """Start recording when recordingToggleKey is pressed."""
         self.isRecordingActive = True
         self.lastActivityTime = time.time()
-        self.recordingStartTime = 0  # <-- Optional: reset session timer
-        self.lastValidTranscriptionTime = time.time()  # ✅ Reset silence timer
+        self.recordingStartTime = time.time()  # Reset session timer
+        self.lastValidTranscriptionTime = time.time()  # Reset idle timeout timer
         if not self.modelLoaded:  # ensure model is ready
             self.loadModel()
+
+        self.currently_speaking = False
+        self.silence_start_time = None
+        self.audioBuffer = np.array([], dtype=np.float32)  # Clear buffer on new start
+
         print("Recording started...")
+        self.playNotification("recordingOn")
 
     def stopRecording(self):
         """Stop recording."""
@@ -419,12 +447,49 @@ class SpeechToTextTranscriber(BaseTranscriber):
         modelThread.start()
 
     def processAudioChunks(self):
-        """Process audio chunks from the queue."""
+        """
+        Process audio chunks from the queue, update speaking state for busyContinuous mode,
+        and append chunks to the main audio buffer.
+        """
+        processed_chunk = False  # Flag to track if any work was done
         while not self.audioQueue.empty():
             audioChunk = self.audioQueue.get()
+
             if self.actualChannels > 1:
-                audioChunk = np.mean(audioChunk, axis=1)  # Convert stereo to mono
-            self.audioBuffer = np.concatenate((self.audioBuffer, audioChunk.flatten()))
+                mono_chunk = np.mean(audioChunk, axis=1).flatten()
+            else:
+                mono_chunk = audioChunk.flatten()
+
+            if self.isRecordingActive and self.transcriptionMode == "busyContinuous":
+
+                chunk_loudness = np.mean(np.abs(mono_chunk))
+
+                if self.debugPrint:
+                    print(
+                        f"DEBUG (Chunk): Loudness={chunk_loudness:.4f}, Threshold={self.busyContinuousSilenceThreshold}")
+
+                if chunk_loudness >= self.busyContinuousSilenceThreshold:
+                    if not self.currently_speaking:
+                        if self.debugPrint:
+                            print(
+                                f"DEBUG: Speech detected (Loudness {chunk_loudness:.4f} >= {self.busyContinuousSilenceThreshold})")
+                        self.currently_speaking = True
+
+                    self.silence_start_time = None
+
+                else:
+
+                    if self.currently_speaking:
+                        if self.silence_start_time is None:
+                            if self.debugPrint:
+                                print(
+                                    f"DEBUG: Silence detected after speech (Loudness {chunk_loudness:.4f}), starting silence timer ({self.busyContinuousTime}s)")
+                            self.silence_start_time = time.time()
+
+            self.audioBuffer = np.concatenate((self.audioBuffer, mono_chunk))
+            processed_chunk = True  # Mark that at least one chunk was processed
+
+        return processed_chunk
 
     def handleRecordingTiming(self):
         """Handle recording session timing."""
@@ -443,41 +508,92 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 self.emptyTranscriptionCount = 0
 
     def transcribeAudio(self):
-        """Handle transcription according to the selected mode."""
-        if not self.isRecordingActive or len(self.audioBuffer) == 0:
+        """
+        Handle transcription according to the selected mode.
+        - constantInterval: Transcribes fixed intervals based on 'transcriptionInterval'.
+        - busyContinuous: Accumulates audio while speech is detected and transcribes
+                          the entire segment only after speech stops and a silence
+                          period defined by 'busyContinuousTime' elapses.
+        """
+        if not self.isRecordingActive:
             return
 
         currentTime = time.time()
-        audioData = None
+        audioData = None  # Holds the audio data segment to be transcribed
+        perform_transcription = False  # Flag to indicate if transcription should proceed
 
         if self.transcriptionMode == "constantInterval":
             if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval:
-                audioData = self.audioBuffer.copy()
-                self.audioBuffer = np.array([], dtype=np.float32)
-                self.lastTranscriptionTime = currentTime
-
-        elif self.transcriptionMode == "busyContinuous":
-            requiredSamples = int(self.busyContinuousTime * self.actualSampleRate)
-            if len(self.audioBuffer) >= requiredSamples:
-                trailingChunk = self.audioBuffer[-requiredSamples:]
-                trailingMean = np.mean(np.abs(trailingChunk))
-                if trailingMean < self.busyContinuousSilenceThreshold:  # Comparison remains the same
+                if len(self.audioBuffer) > 0:
                     audioData = self.audioBuffer.copy()
                     self.audioBuffer = np.array([], dtype=np.float32)
+                    self.lastTranscriptionTime = currentTime  # Reset the timer for the next interval
+                    perform_transcription = True
+                    if self.debugPrint:
+                        print(
+                            f"DEBUG (constantInterval): Interval reached. Processing buffer of {len(audioData)} samples.")
+                else:
                     self.lastTranscriptionTime = currentTime
+                    if self.debugPrint:
+                        print(
+                            "DEBUG (constantInterval): Interval reached. Buffer empty, resetting timer.")
 
-        if audioData is None:
-            return
 
-        segmentMean = np.mean(np.abs(audioData))
-        if segmentMean < self.lowLoudnessSkip_threshold:  # Comparison remains the same
-            transcription = ""
-            self._debugPrint(f"lower than loudness threshold {segmentMean}")
-        else:
-            transcription = super().transcribeAudio(audioData, self.actualSampleRate)
+        elif self.transcriptionMode == "busyContinuous":
 
-        self.handleTranscriptionOutput(transcription, segmentMean)
-        self.lastActivityTime = currentTime
+            if self.currently_speaking and self.silence_start_time is not None:
+                elapsed_silence = currentTime - self.silence_start_time
+                if self.debugPrint and elapsed_silence < self.busyContinuousTime:
+                    pass
+
+                if elapsed_silence >= self.busyContinuousTime:
+                    if self.debugPrint:
+                        print(
+                            f"DEBUG (busyContinuous): Silence duration ({elapsed_silence:.2f}s) >= threshold ({self.busyContinuousTime}s). Triggering transcription.")
+
+                    if len(self.audioBuffer) > 0:
+                        audioData = self.audioBuffer.copy()
+                        self.audioBuffer = np.array([], dtype=np.float32)
+                        self.lastTranscriptionTime = currentTime  # Mark time for potential future use
+                        perform_transcription = True
+
+                        self.currently_speaking = False
+                        self.silence_start_time = None
+                        if self.debugPrint:
+                            print(
+                                "DEBUG (busyContinuous): State reset after transcription trigger.")
+                    else:
+                        if self.debugPrint:
+                            print(
+                                "DEBUG (busyContinuous): Silence trigger met, but buffer is empty. Resetting state without transcription.")
+                        self.currently_speaking = False
+                        self.silence_start_time = None
+
+        if perform_transcription and audioData is not None:
+            segment_duration = len(audioData) / self.actualSampleRate
+            if self.debugPrint:
+                print(f"DEBUG: Processing segment of duration {segment_duration:.2f}s")
+
+            segmentMean = np.mean(np.abs(audioData))
+            if self.debugPrint:
+                print(f"DEBUG: Segment mean loudness = {segmentMean:.4f}")
+
+            if segmentMean < self.lowLoudnessSkip_threshold:
+                transcription = ""  # Treat as empty transcription
+                if self.debugPrint:
+                    print(
+                        f"DEBUG: Segment mean loudness ({segmentMean:.4f}) < lowLoudnessSkip_threshold ({self.lowLoudnessSkip_threshold}). Skipping transcription.")
+            else:
+                if self.debugPrint:
+                    print(
+                        f"DEBUG: Segment mean loudness ({segmentMean:.4f}) >= lowLoudnessSkip_threshold. Proceeding to ASR.")
+
+                transcription = super().transcribeAudio(audioData, self.actualSampleRate)
+
+            self.handleTranscriptionOutput(transcription,
+                                           segmentMean)  # Pass segment loudness for filtering
+
+            self.lastActivityTime = currentTime
 
     def handleTranscriptionOutput(self, transcription, loudnessValue):
         """Post-process transcription and manage silence time-out."""
@@ -575,8 +691,8 @@ if __name__ == "__main__":
             busyContinuousTime=1.4,  # Still relevant for busyContinuous mode timing
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=3.0,
-            lowLoudnessSkip_threshold=0,
-            busyContinuousSilenceThreshold=2,
+            lowLoudnessSkip_threshold=0.0002,
+            busyContinuousSilenceThreshold=.0004,
             playEnableSounds=False,
             maxDuration_recording=10000,
             maxDuration_programActive=2 * 60 * 60,
