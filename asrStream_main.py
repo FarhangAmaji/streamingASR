@@ -1,4 +1,3 @@
-import logging
 import queue
 import threading
 import time
@@ -13,26 +12,38 @@ from transformers import pipeline
 
 
 class SpeechToTextTranscriber:
-    def __init__(self):
-        logging.basicConfig(level=logging.DEBUG)
+    def __init__(self,
+                 modelName="openai/whisper-large-v3",
+                 transcriptionInterval=3,
+                 maxDuration_recording=460,
+                 maxDuration_programActive=60 * 60,
+                 model_unloadTimeout=5 * 60,
+                 consecutiveIdleTime=100,
+                 isRecordingActive=True,
+                 isProgramActive=True,
+                 outputEnabled=False,
+                 sampleRate=16000,
+                 channels=1,
+                 ):
 
         # Audio recording parameters
-        self.sampleRate = 16000  # Hz
-        self.channels = 1  # Mono
+        self.sampleRate = sampleRate
+        self.channels = channels
         self.blockSize = 1024  # Number of frames per block
-        self.transcriptionInterval = 3  # Seconds to accumulate audio before transcription
-        self.maxDuration_recording = 460  # Maximum recording duration in seconds
-        self.maxDuration_programActive = 1777  # Maximum time the program stays active
-        self.consecutiveIdleTime = 13  # Maximum consecutive seconds of silence before stopping
-        self.model_unloadTimeout = 1222  # Seconds of inactivity before unloading model from GPU
+        self.transcriptionInterval = transcriptionInterval
+        self.maxDuration_recording = maxDuration_recording
+        self.maxDuration_programActive = maxDuration_programActive
+        self.consecutiveIdleTime = consecutiveIdleTime
+        self.model_unloadTimeout = model_unloadTimeout
+        self.modelName = modelName
 
         # Queue to store audio chunks
         self.audioQueue = queue.Queue()
 
         # Flags to control recording and output
-        self.isRecordingActive = True
-        self.isProgramActive = True
-        self.outputEnabled = False  # Flag to toggle pyautogui output
+        self.isRecordingActive = isRecordingActive
+        self.isProgramActive = isProgramActive
+        self.outputEnabled = outputEnabled  # Flag to toggle pyautogui output
         self.modelLoaded = False
         self.lastActivityTime = time.time()
 
@@ -58,7 +69,7 @@ class SpeechToTextTranscriber:
         if not self.modelLoaded:
             print("Loading model to GPU...")
             self.asr = pipeline("automatic-speech-recognition",
-                                model="openai/whisper-large-v3",
+                                model=self.modelName,
                                 generate_kwargs={"language": "en"},
                                 # Explicitly set language to English
                                 device=self.device)
@@ -74,6 +85,7 @@ class SpeechToTextTranscriber:
             print("Unloading model from GPU...")
             self.asr = None
             torch.cuda.empty_cache()  # Free GPU memory
+            # This frees up GPU memory that was allocated by PyTorch in this process and doesn't interrupt my other codes or other programmes which use gpu
             self.modelLoaded = False
             print("Model unloaded from GPU")
 
@@ -331,7 +343,19 @@ class SpeechToTextTranscriber:
 # Main execution
 if __name__ == "__main__":
     try:
-        transcriber = SpeechToTextTranscriber()
+        transcriber = SpeechToTextTranscriber(
+            modelName="openai/whisper-large-v3",
+            transcriptionInterval=5,  # Longer interval between transcriptions
+            maxDuration_recording=200,  # 200s max recording
+            maxDuration_programActive=3600,  # 1 hour program active time
+            model_unloadTimeout=5 * 60,  # Unload after 5 minutes
+            consecutiveIdleTime=100,  # Stop after 20 seconds of silence
+            isRecordingActive=True,  # Start with recording off
+            outputEnabled=False,  # Start with output off
+            sampleRate=16000,  # Higher sample rate
+            channels=1
+        )
+
         # Use default input device
         transcriber.run()
     except Exception as e:
