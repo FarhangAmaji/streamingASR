@@ -1,5 +1,4 @@
 import gc
-import math
 import os
 import queue
 import threading
@@ -316,6 +315,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.actualSampleRate = self.sampleRate
         self.actualChannels = self.channels
 
+        self.lastValidTranscriptionTime = time.time()
+
         # List available audio devices
         print("Available audio devices:")
         devices = sd.query_devices()
@@ -351,8 +352,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
         """Start recording when recordingToggleKey is pressed."""
         self.isRecordingActive = True
         self.lastActivityTime = time.time()
-        # Make sure model is loaded when recording starts
-        if not self.modelLoaded:
+        self.lastValidTranscriptionTime = time.time()  # ← reset silence timer
+        if not self.modelLoaded:  # ensure model is ready
             self.loadModel()
         print("Recording started...")
 
@@ -516,60 +517,44 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.handleTranscriptionOutput(transcription, segmentMean)
         self.lastActivityTime = currentTime
 
-    def handleTranscriptionOutput(self, transcription, loudnessSum):
-        """Process transcription output with false detection handling and Ctrl key management."""
-        # Remove trailing dots if the option is enabled (already handled in base class, but normalize for comparison)
-        cleanedText = transcription.strip().lower()
+    def handleTranscriptionOutput(self, transcription, loudnessValue):
+        """Post-process transcription and manage silence time-out."""
+        now = time.time()
+        effectiveInterval = (
+            self.busyContinuousTime
+            if self.transcriptionMode == "busyContinuous"
+            else self.transcriptionInterval
+        )
 
-        # Calculate the loudness threshold for this transcription interval
-        loudnessThreshold = self.loudnessThresholdOfCommonFalseDetectedWords * self.transcriptionInterval
+        cleaned = transcription.strip().lower()
+        isEmpty = (cleaned == "") or (cleaned == ".")
+        isFalseWord = cleaned in [w.lower() for w in self.commonFalseDetectedWords]
+        loudnessThresh = self.loudnessThresholdOfCommonFalseDetectedWords * effectiveInterval
+        isBelow = loudnessValue < loudnessThresh
+        isFalseDetection = isFalseWord and isBelow
 
-        # Check if the transcription is empty or just periods
-        isEmpty = not cleanedText or cleanedText == "."
-
-        # Check if the transcription is in the common false detection list
-        isInFalseDetectionList = cleanedText in [word.lower() for word in
-                                                 self.commonFalseDetectedWords]
-
-        # Check if the loudness is below threshold
-        isBelowThreshold = loudnessSum < loudnessThreshold
-
-        # Determine if this is a false detection
-        isFalseDetection = isInFalseDetectionList and isBelowThreshold
-
-        # Print when word is in false detection list but above threshold
-        if isInFalseDetectionList and not isBelowThreshold:
-            print(f"Potential false detection but above threshold: '{cleanedText}'. "
-                  f"Loudness: {loudnessSum}, Threshold: {loudnessThreshold}")
-
-        if isEmpty or isFalseDetection:
-            # Increment empty transcription count
-            self.emptyTranscriptionCount += 1
-            maxEmptyTranscriptions = math.ceil(
-                self.consecutiveIdleTime / self.transcriptionInterval)
-            if self.debugPrint:
-                print(f"Empty transcription detected "
-                      f"({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})")
-
-            # Check if we've reached the maximum number of empty transcriptions
-            if self.emptyTranscriptionCount >= maxEmptyTranscriptions:
-                print(
-                    f"Reached {self.consecutiveIdleTime} seconds of silence, stopping recording...")
-                self.stopRecording()
-                self.recordingStartTime = 0
-                self.emptyTranscriptionCount = 0
-        else:
+        # ─────────────────────────── valid speech ────────────────────────────
+        if not isEmpty and not isFalseDetection:
             print("Transcription:", transcription)
-            # Valid transcription
-            if self.outputEnabled:
-                # Restore original formatting for output
-                outputText = transcription.lstrip(" ") + " "
 
-                ctrlWasPressed = keyboard.is_pressed('ctrl')  # Check if Ctrl is pressed
-                if not ctrlWasPressed:
-                    pyautogui.write(outputText)
+            if self.outputEnabled and not keyboard.is_pressed("ctrl"):
+                pyautogui.write(transcription.lstrip(" ") + " ")
 
-            # Reset consecutive empty transcription count
+            self.emptyTranscriptionCount = 0  # optional, still reset
+            self.lastValidTranscriptionTime = now  # ← mark last real speech
+            return
+
+        # ─────────────────────── silence / false detection ───────────────────
+        silentFor = now - self.lastValidTranscriptionTime
+        if self.debugPrint:
+            print(f"Silent for {silentFor:.1f}s "
+                  f"(threshold {self.consecutiveIdleTime}s)")
+
+        if silentFor >= self.consecutiveIdleTime:
+            print(f"Reached {self.consecutiveIdleTime} seconds of silence, "
+                  f"stopping recording...")
+            self.stopRecording()
+            self.recordingStartTime = 0
             self.emptyTranscriptionCount = 0
 
     def cleanupInactiveRecording(self):
@@ -636,8 +621,9 @@ if __name__ == "__main__":
     try:
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
-            transcriptionMode="constantInterval",  # "busyContinuous",  # |constantInterval
+            transcriptionMode="busyContinuous",  # |constantInterval
             transcriptionInterval=4,  # Longer interval between transcriptions
+            busyContinuousTime=1.4,
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=20,
             lowLoudnessSkip_threshold=0,
