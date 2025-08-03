@@ -229,25 +229,25 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
     def __init__(self,
                  modelName="openai/whisper-large-v3",
-                 transcriptionInterval=3,
-                 busyContinuousTime=0.6,
-                 transcriptionMode="constantInterval",
-                 skipSilence_afterNSecSilence=0.3,  # Add the argument here
+                 language="en",
+                 transcriptionMode="dictationMode",
+                 constantIntervalMode_transcriptionInterval=3,
+                 dictationMode_silenceDurationToOutput=0.6,
+                 silenceSkip_threshold=.0002,
+                 dictationMode_silenceLoudnessThreshold=2,
+                 skipSilence_afterNSecSilence=0.3,
+                 commonFalseDetectedWords=None,
+                 loudnessThresholdOf_commonFalseDetectedWords=.0008,
                  maxDuration_recording=10000,
                  maxDuration_programActive=60 * 60,
-                 model_unloadTimeout=5 * 60,
+                 model_unloadTimeout=20 * 60,
                  consecutiveIdleTime=100,
                  isRecordingActive=True,
                  isProgramActive=True,
                  outputEnabled=False,
                  sampleRate=16000,
-                 lowLoudnessSkip_threshold=4,
-                 busyContinuousSilenceThreshold=2,
                  channels=1,
                  removeTrailingDots=True,
-                 language="en",
-                 commonFalseDetectedWords=None,
-                 loudnessThresholdOf_commonFalseDetectedWords=2.4,
                  playEnableSounds=True,
                  debugPrint=False,
                  recordingToggleKey="win+alt+l",
@@ -257,15 +257,15 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         Args:
             modelName (str): Name of the Whisper model to use
-            transcriptionInterval (int): Interval for transcription processing (constantInterval mode)
-            busyContinuousTime (float): Duration of silence required after speech to trigger
-                                        transcription (busyContinuous mode).
-            transcriptionMode (str): "constantInterval" or "busyContinuous".
+            constantIntervalMode_transcriptionInterval (int): Interval for transcription processing (constantIntervalMode mode)
+            dictationMode_silenceDurationToOutput (float): Duration of silence required after speech to trigger
+                                        transcription (dictationMode mode).
+            transcriptionMode (str): "constantIntervalMode" or "dictationMode".
             skipSilence_afterNSecSilence (float): If a transcription segment's overall loudness
                                                          is below 'lowLoudnessSkip_threshold', only skip it
                                                          if the average loudness of the *last* N seconds
                                                          (this value) was also below
-                                                         'busyContinuousSilenceThreshold'. Set to 0 to disable
+                                                         'dictationModeSilenceThreshold'. Set to 0 to disable
                                                          this trailing check and revert to only checking overall loudness.
             maxDuration_recording (int): Maximum duration for a single recording session (seconds).
             maxDuration_programActive (int): Maximum duration for program activity (seconds).
@@ -275,10 +275,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
             isProgramActive (bool): Initial program state.
             outputEnabled (bool): Initial output state (typing transcription).
             sampleRate (int): Audio sample rate (Hz).
-            lowLoudnessSkip_threshold (float): Average loudness threshold below which transcription
+            silenceSkip_threshold (float): Average loudness threshold below which transcription
                                                 of a segment is potentially skipped (see above).
-            busyContinuousSilenceThreshold (float): Average loudness threshold below which an incoming
-                                                    audio chunk is considered silent (busyContinuous mode),
+            dictationMode_silenceLoudnessThreshold (float): Average loudness threshold below which an incoming
+                                                    audio chunk is considered silent (dictationMode mode),
                                                     AND used for the trailing check of the low loudness skip feature.
             channels (int): Number of audio channels (1 for mono, 2 for stereo).
             removeTrailingDots (bool): Whether to remove trailing dots from transcriptions.
@@ -297,19 +297,19 @@ class SpeechToTextTranscriber(BaseTranscriber):
                          debugPrint=debugPrint)
 
         self.transcriptionMode = transcriptionMode
-        self.busyContinuousTime = busyContinuousTime
-        self.skipLowLoudness_afterNSecLowLoudness = skipSilence_afterNSecSilence
+        self.dictationMode_silenceDurationToOutput = dictationMode_silenceDurationToOutput
+        self.skipSilence_afterNSecSilence = skipSilence_afterNSecSilence
 
         self.sampleRate = sampleRate
         self.channels = channels
         self.blockSize = 1024  # Number of frames per block (affects callback frequency)
-        self.transcriptionInterval = transcriptionInterval
+        self.transcriptionInterval = constantIntervalMode_transcriptionInterval
         self.maxDurationRecording = maxDuration_recording
         self.maxDurationProgramActive = maxDuration_programActive
         self.consecutiveIdleTime = consecutiveIdleTime
         self.modelUnloadTimeout = model_unloadTimeout
-        self.lowLoudnessSkip_threshold = lowLoudnessSkip_threshold
-        self.busyContinuousSilenceThreshold = busyContinuousSilenceThreshold
+        self.lowLoudnessSkip_threshold = silenceSkip_threshold
+        self.dictationModeSilenceThreshold = dictationMode_silenceLoudnessThreshold
 
         self.commonFalseDetectedWords = commonFalseDetectedWords if commonFalseDetectedWords else []
         self.loudnessThresholdOfCommonFalseDetectedWords = loudnessThresholdOf_commonFalseDetectedWords
@@ -352,7 +352,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         self.lastValidTranscriptionTime = time.time()
 
-        self.currently_speaking = False
+        self.isCurrentlySpeakingFlag = False
         self.silence_start_time = None
 
         print("--- Available Audio Devices ---")
@@ -398,7 +398,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
         if not self.modelLoaded:  # ensure model is ready
             self.loadModel()
 
-        self.currently_speaking = False
+        self.isCurrentlySpeakingFlag = False
         self.silence_start_time = None
         self.audioBuffer = np.array([], dtype=np.float32)  # Clear buffer on new start
 
@@ -488,7 +488,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
     def processAudioChunks(self):
         """
-        Process audio chunks from the queue, update speaking state for busyContinuous mode,
+        Process audio chunks from the queue, update speaking state for dictationMode mode,
         and append chunks to the main audio buffer.
         """
         processed_chunk = False  # Flag to track if any work was done
@@ -500,30 +500,30 @@ class SpeechToTextTranscriber(BaseTranscriber):
             else:
                 mono_chunk = audioChunk.flatten()
 
-            if self.isRecordingActive and self.transcriptionMode == "busyContinuous":
+            if self.isRecordingActive and self.transcriptionMode == "dictationMode":
 
                 chunk_loudness = np.mean(np.abs(mono_chunk))
 
                 if self.debugPrint:
                     print(
-                        f"DEBUG (Chunk): Loudness={chunk_loudness:.4f}, Threshold={self.busyContinuousSilenceThreshold}")
+                        f"DEBUG (Chunk): Loudness={chunk_loudness:.4f}, Threshold={self.dictationModeSilenceThreshold}")
 
-                if chunk_loudness >= self.busyContinuousSilenceThreshold:
-                    if not self.currently_speaking:
+                if chunk_loudness >= self.dictationModeSilenceThreshold:
+                    if not self.isCurrentlySpeakingFlag:
                         if self.debugPrint:
                             print(
-                                f"DEBUG: Speech detected (Loudness {chunk_loudness:.4f} >= {self.busyContinuousSilenceThreshold})")
-                        self.currently_speaking = True
+                                f"DEBUG: Speech detected (Loudness {chunk_loudness:.4f} >= {self.dictationModeSilenceThreshold})")
+                        self.isCurrentlySpeakingFlag = True
 
                     self.silence_start_time = None
 
                 else:
 
-                    if self.currently_speaking:
+                    if self.isCurrentlySpeakingFlag:
                         if self.silence_start_time is None:
                             if self.debugPrint:
                                 print(
-                                    f"DEBUG: Silence detected after speech (Loudness {chunk_loudness:.4f}), starting silence timer ({self.busyContinuousTime}s)")
+                                    f"DEBUG: Silence detected after speech (Loudness {chunk_loudness:.4f}), starting silence timer ({self.dictationMode_silenceDurationToOutput}s)")
                             self.silence_start_time = time.time()
 
             self.audioBuffer = np.concatenate((self.audioBuffer, mono_chunk))
@@ -550,10 +550,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
     def transcribeAudio(self):
         """
         Handle transcription according to the selected mode.
-        - constantInterval: Transcribes fixed intervals based on 'transcriptionInterval'.
-        - busyContinuous: Accumulates audio while speech is detected and transcribes
+        - constantIntervalMode: Transcribes fixed intervals based on 'transcriptionInterval'.
+        - dictationMode: Accumulates audio while speech is detected and transcribes
                           the entire segment only after speech stops and a silence
-                          period defined by 'busyContinuousTime' elapses.
+                          period defined by 'dictationMode_silenceDurationToOutput' elapses.
         """
         if not self.isRecordingActive:
             return
@@ -562,7 +562,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
         audioData = None  # Holds the audio data segment to be transcribed
         perform_transcription = False  # Flag to indicate if transcription should proceed
 
-        if self.transcriptionMode == "constantInterval":
+        if self.transcriptionMode == "constantIntervalMode":
             if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval:
                 if len(self.audioBuffer) > 0:
                     audioData = self.audioBuffer.copy()
@@ -571,25 +571,25 @@ class SpeechToTextTranscriber(BaseTranscriber):
                     perform_transcription = True
                     if self.debugPrint:
                         print(
-                            f"DEBUG (constantInterval): Interval reached. Processing buffer of {len(audioData)} samples.")
+                            f"DEBUG (constantIntervalMode): Interval reached. Processing buffer of {len(audioData)} samples.")
                 else:
                     self.lastTranscriptionTime = currentTime
                     if self.debugPrint:
                         print(
-                            "DEBUG (constantInterval): Interval reached. Buffer empty, resetting timer.")
+                            "DEBUG (constantIntervalMode): Interval reached. Buffer empty, resetting timer.")
 
 
-        elif self.transcriptionMode == "busyContinuous":
+        elif self.transcriptionMode == "dictationMode":
 
-            if self.currently_speaking and self.silence_start_time is not None:
+            if self.isCurrentlySpeakingFlag and self.silence_start_time is not None:
                 elapsed_silence = currentTime - self.silence_start_time
-                if self.debugPrint and elapsed_silence < self.busyContinuousTime:
+                if self.debugPrint and elapsed_silence < self.dictationMode_silenceDurationToOutput:
                     pass  # Optional debug for silence timer progress
 
-                if elapsed_silence >= self.busyContinuousTime:
+                if elapsed_silence >= self.dictationMode_silenceDurationToOutput:
                     if self.debugPrint:
                         print(
-                            f"DEBUG (busyContinuous): Silence duration ({elapsed_silence:.2f}s) >= threshold ({self.busyContinuousTime}s). Triggering transcription.")
+                            f"DEBUG (dictationMode): Silence duration ({elapsed_silence:.2f}s) >= threshold ({self.dictationMode_silenceDurationToOutput}s). Triggering transcription.")
 
                     if len(self.audioBuffer) > 0:
                         audioData = self.audioBuffer.copy()
@@ -597,16 +597,16 @@ class SpeechToTextTranscriber(BaseTranscriber):
                         self.lastTranscriptionTime = currentTime
                         perform_transcription = True
 
-                        self.currently_speaking = False
+                        self.isCurrentlySpeakingFlag = False
                         self.silence_start_time = None
                         if self.debugPrint:
                             print(
-                                "DEBUG (busyContinuous): State reset after transcription trigger.")
+                                "DEBUG (dictationMode): State reset after transcription trigger.")
                     else:
                         if self.debugPrint:
                             print(
-                                "DEBUG (busyContinuous): Silence trigger met, but buffer is empty. Resetting state without transcription.")
-                        self.currently_speaking = False
+                                "DEBUG (dictationMode): Silence trigger met, but buffer is empty. Resetting state without transcription.")
+                        self.isCurrentlySpeakingFlag = False
                         self.silence_start_time = None
 
         if perform_transcription and audioData is not None and len(audioData) > 0:
@@ -622,32 +622,32 @@ class SpeechToTextTranscriber(BaseTranscriber):
             if segmentMean < self.lowLoudnessSkip_threshold:
 
                 trailing_samples = 0
-                if self.skipLowLoudness_afterNSecLowLoudness > 0:
+                if self.skipSilence_afterNSecSilence > 0:
                     trailing_samples = int(
-                        self.skipLowLoudness_afterNSecLowLoudness * self.actualSampleRate)
+                        self.skipSilence_afterNSecSilence * self.actualSampleRate)
 
                 if trailing_samples > 0 and len(audioData) >= trailing_samples:
                     trailing_audio = audioData[-trailing_samples:]
                     trailing_loudness = np.mean(np.abs(trailing_audio))
 
-                    if trailing_loudness >= self.busyContinuousSilenceThreshold:
+                    if trailing_loudness >= self.dictationModeSilenceThreshold:
                         perform_asr = True  # Override the skip decision
                         if self.debugPrint:
                             print(
                                 f"DEBUG: Overriding low loudness skip: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}) "
-                                f"but trailing {self.skipLowLoudness_afterNSecLowLoudness}s loudness ({trailing_loudness:.4f}) >= busyContinuousSilenceThreshold ({self.busyContinuousSilenceThreshold})")
+                                f"but trailing {self.skipSilence_afterNSecSilence}s loudness ({trailing_loudness:.4f}) >= dictationModeSilenceThreshold ({self.dictationModeSilenceThreshold})")
                     else:
                         perform_asr = False
                         if self.debugPrint:
                             print(
                                 f"DEBUG: Low loudness skip CONFIRMED: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}) "
-                                f"AND trailing {self.skipLowLoudness_afterNSecLowLoudness}s loudness ({trailing_loudness:.4f}) < busyContinuousSilenceThreshold ({self.busyContinuousSilenceThreshold})")
+                                f"AND trailing {self.skipSilence_afterNSecSilence}s loudness ({trailing_loudness:.4f}) < dictationModeSilenceThreshold ({self.dictationModeSilenceThreshold})")
                 else:
                     perform_asr = False
                     if self.debugPrint:
                         print(
                             f"DEBUG: Low loudness skip: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}). "
-                            f"Segment shorter than {self.skipLowLoudness_afterNSecLowLoudness}s or trailing check disabled.")
+                            f"Segment shorter than {self.skipSilence_afterNSecSilence}s or trailing check disabled.")
 
             if perform_asr:
                 if self.debugPrint and not (segmentMean < self.lowLoudnessSkip_threshold):
@@ -663,7 +663,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 if self.debugPrint:
                     print("DEBUG: Skipping transcription due to low loudness conditions.")
 
-            self.handleTranscriptionOutput(transcription, segmentMean)
+            self.processAndHandleTranscription(transcription, segmentMean)
 
             self.lastActivityTime = currentTime
         elif perform_transcription and (audioData is None or len(audioData) == 0):
@@ -671,12 +671,12 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 print(
                     "DEBUG: Transcription triggered but audioData is None or empty. Skipping output handling.")
 
-    def handleTranscriptionOutput(self, transcription, loudnessValue):
+    def processAndHandleTranscription(self, transcription, loudnessValue):
         """Post-process transcription and manage silence time-out."""
         now = time.time()
         effectiveInterval = (
-            self.busyContinuousTime
-            if self.transcriptionMode == "busyContinuous"
+            self.dictationMode_silenceDurationToOutput
+            if self.transcriptionMode == "dictationMode"
             else self.transcriptionInterval
         )
 
@@ -762,13 +762,13 @@ if __name__ == "__main__":
     try:
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
-            transcriptionMode="busyContinuous",
-            transcriptionInterval=4,  # Still relevant for constantInterval mode timing
-            busyContinuousTime=.8,  # Still relevant for busyContinuous mode timing
+            transcriptionMode="dictationMode",
+            constantIntervalMode_transcriptionInterval=4,
+            dictationMode_silenceDurationToOutput=.6,
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
-            loudnessThresholdOf_commonFalseDetectedWords=3.0,
-            lowLoudnessSkip_threshold=0.0002,
-            busyContinuousSilenceThreshold=.0004,
+            loudnessThresholdOf_commonFalseDetectedWords=.0008,
+            silenceSkip_threshold=0.0002,
+            dictationMode_silenceLoudnessThreshold=.0004,
             playEnableSounds=False,
             maxDuration_recording=10000,
             maxDuration_programActive=2 * 60 * 60,
