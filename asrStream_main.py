@@ -213,6 +213,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
     def __init__(self,
                  modelName="openai/whisper-large-v3",
                  transcriptionInterval=3,
+                 busyContinuousTime=0.6,
+                 transcriptionMode="constantInterval",
                  maxDuration_recording=10000,
                  maxDuration_programActive=60 * 60,
                  model_unloadTimeout=5 * 60,
@@ -222,11 +224,13 @@ class SpeechToTextTranscriber(BaseTranscriber):
                  outputEnabled=False,
                  sampleRate=16000,
                  lowLoudnessSkip_threshold=4,
+                 busyContinuousSilenceThreshold=2,
                  channels=1,
                  removeTrailingDots=True,
                  language="en",
                  commonFalseDetectedWords=None,
                  loudnessThresholdOf_commonFalseDetectedWords=2.4,
+                 playEnableSounds=True,
                  debugPrint=False,
                  recordingToggleKey="win+alt+l",
                  outputToggleKey="ctrl+q"):
@@ -258,6 +262,9 @@ class SpeechToTextTranscriber(BaseTranscriber):
                          removeTrailingDots=removeTrailingDots,
                          debugPrint=debugPrint)
 
+        self.transcriptionMode = transcriptionMode  # "constantInterval" | "busyContinuous"
+        self.busyContinuousTime = busyContinuousTime  # seconds to look-back for silence
+
         # Audio recording parameters
         self.sampleRate = sampleRate
         self.channels = channels
@@ -268,6 +275,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.consecutiveIdleTime = consecutiveIdleTime
         self.modelUnloadTimeout = model_unloadTimeout
         self.lowLoudnessSkip_threshold = lowLoudnessSkip_threshold
+        self.busyContinuousSilenceThreshold = busyContinuousSilenceThreshold
 
         # Parameters for false word detection handling
         self.commonFalseDetectedWords = commonFalseDetectedWords if commonFalseDetectedWords else []
@@ -285,6 +293,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         self.recordingToggleKey = recordingToggleKey
         self.outputToggleKey = outputToggleKey
+        self.playEnableSounds = playEnableSounds
+        self.enablingSounds = {"outputEnabled", "recordingOn"}
 
         # Initialize pygame for audio playback
         pygame.mixer.init()
@@ -312,7 +322,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
         print(devices)
 
     def playNotification(self, soundName):
-        """Play notification sound."""
+        if not self.playEnableSounds and soundName in self.enablingSounds:
+            return
         if soundName in self.audioFiles:
             try:
                 sound = pygame.mixer.Sound(self.audioFiles[soundName])
@@ -466,36 +477,44 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 self.emptyTranscriptionCount = 0
 
     def transcribeAudio(self):
-        """Override base class method to include real-time specific transcription handling."""
+        """Handle transcription according to the selected mode."""
+        if not self.isRecordingActive or len(self.audioBuffer) == 0:
+            return
+
         currentTime = time.time()
+        audioData = None
 
-        # Check if it's time to transcribe
-        if (self.isRecordingActive and len(self.audioBuffer) > 0 and
-                (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval):
+        # ────────────── MODE: constantInterval ──────────────
+        if self.transcriptionMode == "constantInterval":
+            if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval:
+                audioData = self.audioBuffer.copy()
+                self.audioBuffer = np.array([], dtype=np.float32)
+                self.lastTranscriptionTime = currentTime
 
-            # Copy audio buffer for transcription
-            audioData = self.audioBuffer.copy()
-            self.audioBuffer = np.array([], dtype=np.float32)  # Clear buffer after copying
+        # ────────────── MODE: busyContinuous ──────────────
+        elif self.transcriptionMode == "busyContinuous":
+            requiredSamples = int(self.busyContinuousTime * self.actualSampleRate)
+            if len(self.audioBuffer) >= requiredSamples:
+                trailingChunk = self.audioBuffer[-requiredSamples:]
+                trailingMean = np.mean(np.abs(trailingChunk))  # ← use mean, not sum
+                if trailingMean < self.busyContinuousSilenceThreshold:  # ← new threshold
+                    audioData = self.audioBuffer.copy()
+                    self.audioBuffer = np.array([], dtype=np.float32)
+                    self.lastTranscriptionTime = currentTime
 
-            try:
-                # Calculate loudness (RMS)
-                loudnessSum = np.sum(np.abs(self.audioBuffer))
+        # ───────────────────────────────────────────────────
+        if audioData is None:
+            return
 
-                if self.lowLoudnessSkip_threshold > loudnessSum:
-                    transcription = ""
-                    self._debugPrint(f'lower than loudness threshold {loudnessSum}')
-                else:
-                    # Use base class transcription method
-                    transcription = super().transcribeAudio(audioData, self.actualSampleRate)
+        segmentMean = np.mean(np.abs(audioData))
+        if segmentMean < self.lowLoudnessSkip_threshold:
+            transcription = ""
+            self._debugPrint(f"lower than loudness threshold {segmentMean}")
+        else:
+            transcription = super().transcribeAudio(audioData, self.actualSampleRate)
 
-                # Handle transcription output with false detection
-                self.handleTranscriptionOutput(transcription, loudnessSum)
-
-            except Exception as e:
-                print(f"Error during transcription: {e}")
-
-            self.lastTranscriptionTime = currentTime
-            self.lastActivityTime = currentTime
+        self.handleTranscriptionOutput(transcription, segmentMean)
+        self.lastActivityTime = currentTime
 
     def handleTranscriptionOutput(self, transcription, loudnessSum):
         """Process transcription output with false detection handling and Ctrl key management."""
@@ -617,10 +636,12 @@ if __name__ == "__main__":
     try:
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
+            transcriptionMode="constantInterval",  # "busyContinuous",  # |constantInterval
             transcriptionInterval=4,  # Longer interval between transcriptions
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=20,
             lowLoudnessSkip_threshold=0,
+            playEnableSounds=False,
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=2 * 60 * 60,  # 1 hour program active time
             model_unloadTimeout=20 * 60,  # time to Unload model from gpu
