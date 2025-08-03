@@ -2,6 +2,7 @@ import abc  # Abstract Base Classes
 import gc
 import os
 import queue
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,14 @@ import sounddevice as sd
 import soundfile as sf
 import torch
 from transformers import pipeline
+
+try:
+    from nemo.collections.asr.models import ASRModel
+
+    NEMO_AVAILABLE = True
+except Exception:
+    ASRModel = None  # Define as None if NeMo is not installed
+    NEMO_AVAILABLE = False
 
 
 def logDebug(message, debugPrintFlag):
@@ -259,6 +268,190 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         except Exception as e:
             logError(f"Could not fetch models from Hugging Face Hub: {e}")
             return []
+
+
+class NemoModelHandler(AbstractAsrModelHandler):
+    """
+    Concrete implementation of AbstractAsrModelHandler for NeMo ASR models
+    provided by Nvidia.
+    """
+
+    def __init__(self, config):
+        """
+        Initializes the NeMo model handler.
+
+        Args:
+            config (ConfigurationManager): Application configuration object.
+        """
+        super().__init__(config)
+        self._checkNemoAvailability()
+        self._determineDevice()
+        self.config.set('device', self.device)  # Update config with actual device
+        self.model = None  # Explicitly define the model attribute
+
+    def _checkNemoAvailability(self):
+        """Checks if the NeMo toolkit is installed."""
+        if not NEMO_AVAILABLE:
+            errMsg = "NeMo toolkit not found, cannot use Nvidia ASR models. Install with: pip install nemo_toolkit[asr]"
+            logError(errMsg)
+            raise ImportError(errMsg)
+
+    def _determineDevice(self):
+        """Determines the compute device (CUDA GPU or CPU)."""
+        if self.config.get('onlyCpu'):
+            self.device = torch.device('cpu')
+            logInfo("CPU usage forced by 'onlyCpu=True'.")
+        else:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if self.device.type == 'cuda':
+                logInfo("CUDA GPU detected and will be used for NeMo model.")
+            else:
+                logInfo("CUDA GPU not found or 'onlyCpu=True', using CPU for NeMo model.")
+
+    def _logDebug(self, message):
+        """Local debug logger using the config flag."""
+        logDebug(message, self.config.get('debugPrint'))
+
+    def _cudaClean(self):
+        """Performs garbage collection and attempts to clear PyTorch's CUDA cache."""
+        self._logDebug("Cleaning CUDA memory (NeMo Handler)...")
+        gc.collect()
+        if torch.cuda.is_available() and self.device.type == 'cuda':
+            try:
+                torch.cuda.empty_cache()
+            except Exception as e:
+                logWarning(f"CUDA memory cleaning attempt failed partially (NeMo): {e}")
+        self._logDebug("CUDA memory cleaning attempt finished (NeMo Handler).")
+
+    def _monitorMemory(self):
+        """Monitors and prints current GPU memory usage if debugPrint is enabled."""
+        if torch.cuda.is_available() and self.config.get(
+                'debugPrint') and self.device.type == 'cuda':
+            try:
+                allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+                reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                print(f"GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+            except Exception as e:
+                logWarning(f"Failed to get GPU memory stats: {e}")
+
+    def loadModel(self):
+        """Loads the NeMo ASR model."""
+        if self.modelLoaded:
+            self._logDebug(f"NeMo model '{self.config.get('modelName')}' already loaded.")
+            return
+        if not NEMO_AVAILABLE:
+            logError("Cannot load NeMo model: NeMo toolkit not installed.")
+            return  # Prevent loading if dependency is missing
+
+        self._logDebug(f"Loading NeMo model '{self.config.get('modelName')}' to {self.device}...")
+        self._monitorMemory()
+        self._cudaClean()  # Clean before loading
+
+        try:
+            self.model = ASRModel.from_pretrained(self.config.get('modelName')).to(self.device)
+            self.model.eval()  # Set model to evaluation mode
+            self.modelLoaded = True
+            logInfo(f"NeMo model '{self.config.get('modelName')}' loaded successfully.")
+
+        except Exception as e:
+            logError(f"Failed loading NeMo ASR model '{self.config.get('modelName')}': {e}")
+            logError(
+                "Check model name, NeMo installation (pip install nemo_toolkit[asr]), internet connection, and memory.")
+            self.modelLoaded = False
+            self.model = None
+
+        self._monitorMemory()  # Monitor after loading
+
+    def unloadModel(self):
+        """Unloads the NeMo ASR model and cleans GPU cache."""
+        if not self.modelLoaded:
+            self._logDebug("NeMo model already unloaded.")
+            return
+
+        self._logDebug(
+            f"Unloading NeMo model '{self.config.get('modelName')}' from {self.device}...")
+        if self.model is not None:
+            del self.model
+            self.model = None
+
+        self._cudaClean()  # Clean memory *after* deleting reference
+        self.modelLoaded = False
+        logInfo(f"NeMo model '{self.config.get('modelName')}' unloaded.")
+        self._monitorMemory()
+
+    def transcribeAudioSegment(self, audioData, sampleRate):
+        """
+        Transcribes an audio data segment using the loaded NeMo model.
+
+        Note: This implementation currently saves the audio segment to a
+        temporary file, as NeMo's standard `transcribe` method often expects
+        file paths. This might introduce I/O overhead for real-time streaming.
+        Investigate model-specific direct tensor APIs for potential optimization.
+        """
+        if not self.modelLoaded or self.model is None:
+            self._logDebug("NeMo transcription skipped: Model not loaded.")
+            return ""
+        if audioData is None or len(audioData) == 0:
+            self._logDebug("NeMo transcription skipped: No audio data provided.")
+            return ""
+
+        if audioData.dtype != np.float32:
+            self._logDebug(
+                f"Converting audio data type from {audioData.dtype} to float32 for NeMo.")
+            audioData = audioData.astype(np.float32)
+
+        tempFilePath = None
+        transcription = ""
+        try:
+            segmentDurationSec = len(audioData) / sampleRate
+            self._logDebug(
+                f"Sending {segmentDurationSec:.2f}s audio Transcription Window to NeMo ASR...")
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpFile:
+                tempFilePath = tmpFile.name
+                sf.write(tmpFile.name, audioData, sampleRate, format='WAV', subtype='FLOAT')
+                self._logDebug(f"Saved audio segment to temporary file: {tmpFile.name}")
+
+            with torch.no_grad():  # Disable gradient calculations for inference
+                transcriptions = self.model.transcribe(
+                    paths2audio_files=[tempFilePath],
+                    batch_size=1,  # Process one segment at a time
+                    num_workers=0 if self.device.type == 'cpu' else 1  # Basic worker setting
+                )
+
+            self._logDebug(f"NeMo Raw Result: {transcriptions}")
+
+            if transcriptions and isinstance(transcriptions, list):
+                if transcriptions[0] and isinstance(transcriptions[0], list):
+                    transcription = transcriptions[0][0]
+                elif isinstance(transcriptions[0], str):
+                    transcription = transcriptions[0]
+                else:
+                    logWarning(
+                        f"Unexpected NeMo transcription result format inside list: {type(transcriptions[0])}")
+                    transcription = ""
+            elif isinstance(transcriptions,
+                            str):  # Sometimes it might return a single string directly?
+                transcription = transcriptions
+            else:
+                logWarning(
+                    f"Unexpected NeMo transcription result format: {type(transcriptions)}. Could not extract text.")
+                transcription = ""
+
+        except Exception as e:
+            logError(f"Error during NeMo transcription: {e}")
+            import traceback
+            logError(traceback.format_exc())  # Log full traceback for NeMo errors
+            transcription = ""
+        finally:
+            if tempFilePath and os.path.exists(tempFilePath):
+                try:
+                    os.remove(tempFilePath)
+                    self._logDebug(f"Removed temporary file: {tempFilePath}")
+                except Exception as e:
+                    logWarning(f"Failed to remove temporary file {tempFilePath}: {e}")
+
+        return transcription.strip()  # Return stripped text
 
 
 class ConfigurationManager:
@@ -1089,17 +1282,44 @@ class SpeechToTextOrchestrator:
     def __init__(self, **userConfig):
         self.config = ConfigurationManager(**userConfig)
         self._logDebug = lambda msg: logDebug(msg, self.config.get('debugPrint'))
-        self._logDebug("Initializing SpeechToText Orchestrator...")
+        self._logDebug("Initializing speechToText Orchestrator...")
 
         self.stateManager = StateManager(self.config)
-        model_name_lower = self.config.get('modelName', '').lower()
-        if "whisper" in model_name_lower or \
-                "canary" in model_name_lower or \
-                "parakeet" in model_name_lower:  # Add other patterns if needed
+
+        modelName = self.config.get('modelName', '')
+        modelNameLower = modelName.lower()
+
+        if modelNameLower.startswith("nvidia/"):
+            logInfo(
+                f"Detected Nvidia model prefix. Attempting to use NemoModelHandler for '{modelName}'.")
+            if NEMO_AVAILABLE:
+                try:
+                    self.asrModelHandler = NemoModelHandler(self.config)
+                except ImportError as e:
+                    logError(f"Failed to instantiate NemoModelHandler: {e}")
+                    logError(
+                        "Falling back to whisperModelHandler - This may fail if the model is truly NeMo-only.")
+                    self.asrModelHandler = WhisperModelHandler(self.config)  # Fallback attempt
+                except Exception as e:
+                    logError(f"Unexpected error instantiating NemoModelHandler: {e}")
+                    logError(
+                        "Falling back to whisperModelHandler - This may fail if the model is truly NeMo-only.")
+                    self.asrModelHandler = WhisperModelHandler(self.config)  # Fallback attempt
+            else:
+                logError(
+                    f"Cannot use model '{modelName}': NeMo toolkit not installed (required for 'nvidia/' prefix).")
+                logError("Attempting to load with whisperModelHandler - This is unlikely to work.")
+                self.asrModelHandler = WhisperModelHandler(self.config)
+
+        elif "whisper" in modelNameLower or \
+                "canary" in modelNameLower or \
+                "parakeet" in modelNameLower:  # Add other HF patterns if needed
+            logInfo(f"Using whisperModelHandler for '{modelName}'.")
             self.asrModelHandler = WhisperModelHandler(self.config)
         else:
-            logWarning(f"Model name '{self.config.get('modelName')}' doesn't match known patterns "
-                       f"for WhisperModelHandler. Attempting to load with it anyway.")
+            logWarning(
+                f"Model name '{modelName}' doesn't match known patterns for Nvidia or specific HF models.")
+            logWarning("Attempting to load with whisperModelHandler as a default.")
             self.asrModelHandler = WhisperModelHandler(self.config)
 
         self.systemInteractionHandler = SystemInteractionHandler(self.config)
@@ -1117,12 +1337,14 @@ class SpeechToTextOrchestrator:
 
     def _printInitialInstructions(self):
         """Prints setup info and user instructions."""
-        device_str = str(self.config.get('device')) if self.config.get(
+        deviceStr = str(self.config.get('device')) if self.config.get(
             'device') else "CPU/GPU (Auto)"
+        handlerType = type(self.asrModelHandler).__name__  # Show which handler is chosen
 
         print(f"\n--- Configuration ---")
         print(f"Mode: {self.config.get('transcriptionMode')}")
-        print(f"ASR Model: {self.config.get('modelName')} (Target Device: {device_str})")
+        print(
+            f"ASR Model: {self.config.get('modelName')} (Using Handler: {handlerType}, Target Device: {deviceStr})")
         print(
             f"Audio Device: ID={self.config.get('deviceId') or 'Default'}, Rate={self.config.get('actualSampleRate')}Hz, Channels={self.config.get('actualChannels')}")
         print(f"--- Hotkeys ---")
@@ -1131,7 +1353,7 @@ class SpeechToTextOrchestrator:
         print(f"--- Timeouts ---")
         print(f"Max Recording Duration: {self.config.get('maxDurationRecording')} s")
         print(f"Stop Recording After Silence: {self.config.get('consecutiveIdleTime')} s")
-        print(f"Unload Model After Inactivity: {self.config.get('model_unloadTimeout')} s")
+        print(f"Unload Model After Inactivity: {self.config.get('modelUnloadTimeout')} s")
         print(f"Program Auto-Exit After: {self.config.get('maxDurationProgramActive')} s")
         print(f"------------------\n")
 
@@ -1160,7 +1382,7 @@ class SpeechToTextOrchestrator:
         self._logDebug(f"Started {len(self.threads)} background threads.")
 
     def toggleRecording(self):
-        """Toggles the recording state. Called by SystemInteractionHandler."""
+        """Toggles the recording state. Called by systemInteractionHandler."""
         if self.stateManager.isRecording():
             if self.stateManager.stopRecording():  # If state actually changed
                 self.systemInteractionHandler.playNotification("recordingOff")
@@ -1173,7 +1395,7 @@ class SpeechToTextOrchestrator:
                 logInfo("Recording started via hotkey.")
 
     def toggleOutput(self):
-        """Toggles the text output state. Called by SystemInteractionHandler."""
+        """Toggles the text output state. Called by systemInteractionHandler."""
         newState = self.stateManager.toggleOutput()
         notification = "outputEnabled" if newState else "outputDisabled"
         self.systemInteractionHandler.playNotification(notification)
@@ -1182,21 +1404,21 @@ class SpeechToTextOrchestrator:
         """Main execution loop orchestrating the real-time transcription process."""
         logInfo("Starting main orchestrator loop...")
         try:
-            if self.stateManager.isRecording() and not self.asrModelHandler.isModelLoaded():
+            if self.stateManager.isRecording() and not self.asrModelHandler.isModelLoaded() and self.asrModelHandler.modelLoaded is not None:  # Check modelLoaded isn't None (error state)
                 logInfo("Initial state is recording: ensuring model is loaded...")
                 self.asrModelHandler.loadModel()
                 if not self.asrModelHandler.isModelLoaded():
                     logError(
-                        "CRITICAL: Initial model load failed. Recording disabled. Please check logs.")
+                        "CRITICAL: Initial model load failed. Recording disabled. Please check logs and model compatibility with the handler.")
                     self.stateManager.stopRecording()
 
             self._startBackgroundThreads()
 
-            initial_stream_started = False
+            initialStreamStarted = False
             if self.stateManager.isRecording():
                 logInfo("Initial state is recording: attempting to start audio stream...")
-                initial_stream_started = self.audioHandler.startStream()
-                if not initial_stream_started:
+                initialStreamStarted = self.audioHandler.startStream()
+                if not initialStreamStarted:
                     logError(
                         "CRITICAL: Failed to start audio stream initially. Recording disabled.")
                     self.stateManager.stopRecording()  # Disable recording if stream fails
@@ -1216,10 +1438,10 @@ class SpeechToTextOrchestrator:
                         logInfo("Idle timeout reached, stopping recording...")
                         self.toggleRecording()  # Use toggle logic
 
-                should_stream_be_active = self.stateManager.isRecording()
-                is_stream_actually_active = self.audioHandler.stream is not None and self.audioHandler.stream.active
+                shouldStreamBeActive = self.stateManager.isRecording()
+                isStreamActuallyActive = self.audioHandler.stream is not None and self.audioHandler.stream.active
 
-                if should_stream_be_active and not is_stream_actually_active:
+                if shouldStreamBeActive and not isStreamActuallyActive:
                     self._logDebug("Attempting to start audio stream (recording active)...")
                     if not self.audioHandler.startStream():
                         logError("Failed to start/restart audio stream. Disabling recording.")
@@ -1227,28 +1449,28 @@ class SpeechToTextOrchestrator:
                         time.sleep(1)
                         continue  # Skip the rest of this loop iteration
 
-                elif not should_stream_be_active and is_stream_actually_active:
+                elif not shouldStreamBeActive and isStreamActuallyActive:
                     self._logDebug("Stopping audio stream (recording inactive)...")
                     self.audioHandler.stopStream()
                     self.realTimeProcessor.clearBuffer()
                     self.audioHandler.clearQueue()
 
-                audio_processed_this_loop = False
-                if self.stateManager.isRecording() and is_stream_actually_active:
+                audioProcessedThisLoop = False
+                if self.stateManager.isRecording() and isStreamActuallyActive:
                     while True:
                         chunk = self.audioHandler.getAudioChunk()
                         if chunk is None:
                             break  # Audio queue is empty
                         if self.realTimeProcessor.processIncomingChunk(chunk):
-                            audio_processed_this_loop = True  # Mark that we did work
+                            audioProcessedThisLoop = True  # Mark that we did work
 
-                    if audio_processed_this_loop:
+                    if audioProcessedThisLoop:
                         audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
 
                         if audioDataToTranscribe is not None:
-                            if self.asrModelHandler.isModelLoaded():
+                            if self.asrModelHandler.isModelLoaded() and self.asrModelHandler.model is not None:
                                 self._logDebug(
-                                    f"Transcription triggered with {len(audioDataToTranscribe)} samples. Proceeding to ASR.")
+                                    f"Transcription triggered with {len(audioDataToTranscribe)} samples. Proceeding to ASR ({type(self.asrModelHandler).__name__}).")
                                 transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
                                     audioDataToTranscribe,
                                     self.config.get('actualSampleRate')
@@ -1257,7 +1479,7 @@ class SpeechToTextOrchestrator:
                                     transcriptionResult,
                                     audioDataToTranscribe  # Pass audio data for loudness checks
                                 )
-                            else:
+                            elif not self.asrModelHandler.isModelLoaded():
                                 logWarning(
                                     "Transcription triggered, but ASR model is not loaded. Skipping.")
                                 if self.config.get('transcriptionMode') == 'dictationMode':
@@ -1296,17 +1518,21 @@ class SpeechToTextOrchestrator:
         logInfo("Waiting briefly for background threads to stop...")
         time.sleep(0.5)  # Give threads a moment to react to stateManager.shouldProgramContinue()
 
+        if self.asrModelHandler:
+            logInfo("Cleaning up ASR model handler...")
+            self.asrModelHandler.cleanup()
+
         logInfo("Cleaning up system interaction handler...")
         self.systemInteractionHandler.cleanup()  # Cleanup pygame etc.
 
         logInfo("Attempting to join background threads...")
-        join_timeout = 1.0  # seconds
+        joinTimeout = 1.0  # seconds
         for t in self.threads:
             if t is not None and t.is_alive():
                 try:
-                    t.join(timeout=join_timeout)
+                    t.join(timeout=joinTimeout)
                     if t.is_alive():
-                        logWarning(f"Thread {t.name} did not terminate within {join_timeout}s.")
+                        logWarning(f"Thread {t.name} did not terminate within {joinTimeout}s.")
                 except Exception as e:
                     logWarning(f"Error joining thread {t.name}: {e}")
         self.threads = []  # Clear thread list
