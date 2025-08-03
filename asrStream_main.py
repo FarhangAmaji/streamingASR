@@ -243,17 +243,24 @@ class SpeechToTextTranscriber:
                     # Update activity timestamp
                     self.lastActivityTime = currentTime
 
+                    # Calculate and print the sum of loudness (sum of absolute values)
+                    loudnessSum = np.sum(np.abs(self.audioBuffer))
+                    print(f"Sum of loudness for audio buffer: {loudnessSum}")
+
                     # Apply noise reduction to the audio buffer
-                    reduced_noise_audio = nr.reduce_noise(
+                    reducedNoiseAudio = nr.reduce_noise(
                         y=self.audioBuffer,
                         sr=self.actualSampleRate,
                         stationary=False,  # Use non-stationary noise reduction
                         prop_decrease=.8  # Adjust noise reduction strength (0 to 1)
                     )
 
+                    loudnessSum_reducedNoiseAudio = np.sum(np.abs(reducedNoiseAudio))
+                    print(f"Sum of loudness for reducedNoiseAudio: {loudnessSum_reducedNoiseAudio}")
+
                     # Transcription call using raw
                     transcription = self.asr({
-                        "raw": reduced_noise_audio,
+                        "raw": reducedNoiseAudio,
                         "sampling_rate": self.actualSampleRate
                     })["text"]
                     print("Transcription:", transcription)
@@ -365,7 +372,7 @@ if __name__ == "__main__":
     try:
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
-            transcriptionInterval=5,  # Longer interval between transcriptions
+            transcriptionInterval=1,  # Longer interval between transcriptions
             maxDuration_recording=200,  # 200s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
             model_unloadTimeout=5 * 60,  # Unload after 5 minutes
