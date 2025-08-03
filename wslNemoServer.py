@@ -1,32 +1,19 @@
 # wslNemoServer.py
 
 # ==============================================================================
-# NeMo ASR Model Server (for WSL Environment)
+# NeMo ASR Model Server (for WSL Environment) - Updated with Logging
 # ==============================================================================
 #
 # Purpose:
 # - Runs a simple web server (Flask) inside a WSL environment (e.g., Ubuntu).
 # - Loads a specified Nvidia NeMo ASR model using the nemo_toolkit.
+# - Logs activities to wslNemoServer.log.
 # - Listens for HTTP requests from the main application (running on Windows).
-# - Provides endpoints to:
-#   - /transcribe: Receive audio data, transcribe it using the loaded NeMo model,
-#                  and return the text result.
-#   - /load: Trigger loading of the NeMo model.
-#   - /unload: Trigger unloading of the NeMo model.
-#   - /status: Report whether the model is currently loaded.
+# - Provides endpoints: /transcribe, /load, /unload, /status.
 #
 # Usage:
 # - Run this script from within your WSL distribution.
-# - Pass the required NeMo model name as a command-line argument.
-# - Example: `python wslNemoServer.py --model_name "nvidia/parakeet-rnnt-1.1b" --port 5001`
-#
-# Dependencies (Ensure installed *in WSL*):
-# - Python standard libraries (os, gc, tempfile, argparse, json, logging)
-# - Flask: For the web server (`pip install Flask`).
-# - nemo_toolkit[asr]: Nvidia NeMo toolkit for ASR models (`pip install nemo_toolkit[asr]`).
-# - soundfile: For reading/writing temporary audio files (`pip install soundfile`).
-# - numpy: For audio data manipulation (`pip install numpy`).
-# - torch: Required by NeMo (`pip install torch`).
+# - Example: python wslNemoServer.py --model_name "nvidia/parakeet-rnnt-1.1b" --port 5001
 # ==============================================================================
 
 import argparse
@@ -34,6 +21,9 @@ import gc
 import os
 import tempfile
 import time
+import logging  # Import standard logging
+import sys  # For stdout handler
+import traceback  # For logging exceptions
 
 import numpy as np
 import soundfile as sf
@@ -41,26 +31,54 @@ import torch
 # --- Flask Setup ---
 from flask import Flask, request, jsonify
 
-app = Flask(__name__)
+# --- Configure Logging ---
+logFileName = 'wslNemoServer.log'
+logLevel = logging.INFO  # Default level, can be changed
+logFormat = '%(asctime)s - %(levelname)-8s - %(name)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s'
+dateFormat = '%Y-%m-%d %H:%M:%S,%f'[:-3]  # Milliseconds format
+
+logging.basicConfig(level=logging.DEBUG,  # Set root logger level
+                    format=logFormat,
+                    datefmt=dateFormat,
+                    filename=logFileName,
+                    filemode='a')  # Append mode
+
+# Console Handler (optional, but helpful for seeing logs directly in WSL console)
+consoleHandler = logging.StreamHandler(sys.stdout)
+consoleHandler.setFormatter(logging.Formatter(logFormat, datefmt=dateFormat))
+consoleHandler.setLevel(logLevel)  # Console level can be INFO or DEBUG
+logging.getLogger().addHandler(consoleHandler)  # Add handler to the root logger
+
+# Silence noisy libraries
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("nemo_toolkit").setLevel(logging.WARNING)  # Nemo can be very verbose
+logging.getLogger("torch").setLevel(logging.WARNING)
+logging.getLogger('werkzeug').setLevel(logging.INFO)  # Flask's internal server
+
+logger = logging.getLogger(__name__)  # Get a logger for this module
+logger.info(f"WSL NeMo Server logging configured. Log file: {logFileName}")
 
 # --- NeMo Setup ---
 try:
+    # Import NeMo ASRModel - adjust import based on specific NeMo versions/models if needed
     from nemo.collections.asr.models import ASRModel
 
     nemoAvailable = True
+    logger.info("NVIDIA NeMo toolkit found and imported.")
 except ImportError:
-    print("ERROR: NeMo toolkit not found. This server cannot function.")
-    print("Please install it in your WSL environment: pip install nemo_toolkit[asr]")
+    logger.critical("NeMo toolkit not found. This server cannot function.")
+    logger.critical("Please install it in your WSL environment: pip install nemo_toolkit[asr]")
     ASRModel = None
     nemoAvailable = False
 except Exception as e:
-    print(f"ERROR: Unexpected error importing NeMo: {e}")
+    logger.critical(f"Unexpected error importing NeMo: {e}", exc_info=True)
     ASRModel = None
     nemoAvailable = False
 
+app = Flask(__name__)
+
 
 # --- Global Server State ---
-# Encapsulate model handling logic
 class NemoServerModelHandler:
     """Manages the NeMo ASR model lifecycle and transcription within the server."""
 
@@ -70,49 +88,57 @@ class NemoServerModelHandler:
         self.modelLoaded = False
         self.device = None
         self._determineDevice()
-        print(f"NemoServerModelHandler initialized for model: {self.modelName}")
+        logger.info(f"NemoServerModelHandler initialized for model: {self.modelName}")
 
+    # Inside NemoServerModelHandler class
     def _determineDevice(self):
         """Determines the compute device (CUDA GPU or CPU)."""
-        # Server doesn't need 'onlyCpu' flag, it uses GPU if available
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"NeMo server will use device: {self.device}")
+        # FOR TESTING: Force CPU
+        self.device = torch.device('cpu')
+        logger.info("Forcing CPU usage for NeMo server testing.")
+        # Original logic commented out:
+        # if torch.cuda.is_available():
+        #      self.device = torch.device('cuda')
+        #      logger.info("CUDA available. NeMo server will use GPU.")
+        # else:
+        #      self.device = torch.device('cpu')
+        #      logger.info("CUDA not available. NeMo server will use CPU.")
 
     def _cudaClean(self):
         """Performs garbage collection and attempts to clear PyTorch's CUDA cache."""
-        print("Cleaning CUDA memory (NeMo Server)...")
+        logger.debug("Attempting to clean CUDA memory (NeMo Server)...")
         gc.collect()
         if self.device and self.device.type == 'cuda':
             try:
                 torch.cuda.empty_cache()
+                logger.debug("torch.cuda.empty_cache() called.")
             except Exception as e:
-                print(f"WARNING: CUDA memory cleaning attempt failed partially: {e}")
-        print("CUDA memory cleaning attempt finished (NeMo Server).")
+                logger.warning(f"CUDA memory cleaning attempt failed partially: {e}")
+        logger.debug("CUDA memory cleaning attempt finished (NeMo Server).")
 
     def loadModel(self):
         """Loads the NeMo ASR model."""
         if not nemoAvailable:
-            print("ERROR: Cannot load NeMo model - NeMo toolkit is not available.")
+            logger.error("Cannot load NeMo model - NeMo toolkit is not available.")
             return False
         if self.modelLoaded:
-            print(f"NeMo model '{self.modelName}' already loaded.")
+            logger.info(f"NeMo model '{self.modelName}' already loaded.")
             return True
 
-        print(f"Loading NeMo model '{self.modelName}' to {self.device}...")
-        self._cudaClean()
+        logger.info(f"Attempting to load NeMo model '{self.modelName}' to {self.device}...")
+        self._cudaClean()  # Clean before loading
         startTime = time.time()
         try:
+            # Use the generic ASRModel.from_pretrained - may need adjustment for specific model types
             self.model = ASRModel.from_pretrained(self.modelName).to(self.device)
-            self.model.eval()
+            self.model.eval()  # Set to evaluation mode
             self.modelLoaded = True
             loadTime = time.time() - startTime
-            print(f"NeMo model '{self.modelName}' loaded successfully in {loadTime:.2f}s.")
-            # Optional: Warm-up (usually less critical for NeMo server unless first request latency matters)
-            # self._warmUpModel()
+            logger.info(f"NeMo model '{self.modelName}' loaded successfully in {loadTime:.2f}s.")
             return True
         except Exception as e:
-            print(f"ERROR: Failed loading NeMo model '{self.modelName}': {e}")
-            print("Check model name, internet connection, NeMo installation, and memory.")
+            logger.error(f"Failed loading NeMo model '{self.modelName}': {e}", exc_info=True)
+            logger.error("Check model name, internet connection, NeMo installation, and memory.")
             self.modelLoaded = False
             self.model = None
             self._cudaClean()  # Clean up potential partial load
@@ -121,86 +147,107 @@ class NemoServerModelHandler:
     def unloadModel(self):
         """Unloads the NeMo ASR model."""
         if not self.modelLoaded:
-            print("NeMo model already unloaded.")
+            logger.info("NeMo model already unloaded.")
             return True
 
-        print(f"Unloading NeMo model '{self.modelName}' from {self.device}...")
+        logger.info(f"Unloading NeMo model '{self.modelName}' from {self.device}...")
         if self.model is not None:
+            # Move model to CPU before deleting? Helps sometimes.
+            try:
+                self.model.to('cpu')
+            except Exception:
+                pass  # Ignore errors moving unloaded model
             del self.model
             self.model = None
+
         self.modelLoaded = False
-        self._cudaClean()
-        print(f"NeMo model '{self.modelName}' unloaded.")
+        self._cudaClean()  # Clean memory AFTER deleting reference
+        logger.info(f"NeMo model '{self.modelName}' unloaded.")
         return True
 
-    def transcribeAudioData(self, audioDataBytes, sampleRate):
+    def transcribeAudioData(self, audioDataBytes, sampleRate,
+                            targetLang):  # Add targetLang parameter
         """
-        Transcribes audio data received as bytes. Saves to a temporary file first.
+        Transcribes audio data received as bytes. Converts bytes to numpy array first.
+        Uses the provided targetLang for multilingual models. Handles Hypothesis objects.
         """
         if not self.modelLoaded or self.model is None:
-            print("ERROR: NeMo transcription skipped - Model not loaded.")
+            logger.error("NeMo transcription skipped - Model not loaded.")
             return None  # Indicate failure
-
-        tempFilePath = None
-        transcription = None
+        transcriptionText = None  # Use a different variable name for the final text
         try:
-            # --- Create temporary file ---
-            # Suffix needs dot prefix on Linux/macOS with tempfile
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpFile:
-                tempFilePath = tmpFile.name
-                # Convert bytes back to numpy array (assuming float32)
-                try:
-                    audioNp = np.frombuffer(audioDataBytes, dtype=np.float32)
-                except ValueError as e:
-                    print(f"ERROR: Could not convert received bytes to float32 numpy array: {e}")
-                    return None
-
-                # Write numpy array to the temporary WAV file
-                sf.write(tmpFile.name, audioNp, sampleRate, format='WAV', subtype='FLOAT')
-                print(
-                    f"Saved received audio ({len(audioNp) / sampleRate:.2f}s) to temp file: {tempFilePath}")
+            # Convert bytes back to numpy array (assuming float32)
+            try:
+                audioNp = np.frombuffer(audioDataBytes, dtype=np.float32)
+                if len(audioNp) == 0:
+                    logger.warning("Received zero-length audio data after numpy conversion.")
+                    return ""
+            except ValueError as e:
+                logger.error(f"Could not convert received bytes to float32 numpy array: {e}")
+                return None
+            audioDurationSec = len(audioNp) / sampleRate if sampleRate > 0 else 0
+            logger.info(
+                f"Received {len(audioDataBytes)} bytes ({len(audioNp)} samples, {audioDurationSec:.2f}s, Lang: {targetLang}).")
 
             # --- Perform NeMo Transcription ---
-            print(f"Starting NeMo transcription for temp file...")
+            logger.info(f"Starting NeMo transcription (Lang: {targetLang})...")
             startTime = time.time()
             with torch.no_grad():
-                transcriptions = self.model.transcribe(
-                    paths2audio_files=[tempFilePath],
+                transcriptionResults = self.model.transcribe(
+                    # Use a different name for the raw result
+                    audio=[audioNp],
                     batch_size=1,
-                    num_workers=0  # Use 0 for simplicity/compatibility in server context
+                    target_lang=targetLang,
+                    task='asr'
                 )
             transcribeTime = time.time() - startTime
-            print(f"NeMo transcription finished in {transcribeTime:.2f}s.")
-            print(f"NeMo Raw Result: {transcriptions}")  # Log raw result
+            logger.info(f"NeMo transcription finished in {transcribeTime:.2f}s.")
+            # logger.debug(f"NeMo Raw Result Type: {type(transcriptionResults)}")
+            # logger.debug(f"NeMo Raw Result: {transcriptionResults}") # Can be verbose
 
-            # --- Extract Text ---
-            if transcriptions and isinstance(transcriptions, list) and transcriptions[0]:
-                if isinstance(transcriptions[0], list):  # Handle potential list of hypotheses
-                    transcription = transcriptions[0][0]
-                elif isinstance(transcriptions[0], str):
-                    transcription = transcriptions[0]
-            elif isinstance(transcriptions, str):  # Handle direct string return
-                transcription = transcriptions
+            # --- Extract Text from Hypothesis (or other potential formats) ---
+            # Check if the result is a list and not empty
+            if transcriptionResults and isinstance(transcriptionResults, list):
+                firstResult = transcriptionResults[0]  # Get the first element
 
-            if transcription is None:
-                print("WARNING: NeMo transcription result was empty or in unexpected format.")
-                transcription = ""  # Return empty string for consistency
+                # Check if the first element is a Hypothesis object (common in newer NeMo)
+                # Need to import Hypothesis if we want explicit type checking,
+                # but checking for a '.text' attribute is safer (duck typing)
+                if hasattr(firstResult, 'text') and isinstance(firstResult.text, str):
+                    logger.debug("Raw result is likely a Hypothesis object, extracting .text")
+                    transcriptionText = firstResult.text
+                # Check if it's already a string (some models might return list[str])
+                elif isinstance(firstResult, str):
+                    logger.debug("Raw result is a list containing a string.")
+                    transcriptionText = firstResult
+                # Check for nested list like [['text']]
+                elif isinstance(firstResult, list) and firstResult and isinstance(firstResult[0],
+                                                                                  str):
+                    logger.debug("Raw result is a nested list containing a string.")
+                    transcriptionText = firstResult[0]
+                else:
+                    logger.warning(
+                        f"NeMo transcription result item has unexpected format: {type(firstResult)}. Full result: {transcriptionResults}")
+                    transcriptionText = ""  # Default to empty if extraction fails
+
+            # Handle case where transcribe might return a single string directly
+            elif isinstance(transcriptionResults, str):
+                logger.debug("Raw result is a single string.")
+                transcriptionText = transcriptionResults
+            else:
+                logger.warning(
+                    f"NeMo transcription result was empty or in unexpected format: {type(transcriptionResults)}. Full result: {transcriptionResults}")
+                transcriptionText = ""  # Default to empty
+
+            # Strip whitespace from the extracted text
+            transcriptionText = transcriptionText.strip() if transcriptionText else ""
 
         except Exception as e:
-            print(f"ERROR during NeMo transcription process: {e}")
-            import traceback
-            print(traceback.format_exc())
-            transcription = None  # Indicate failure
-        finally:
-            # --- Clean up temporary file ---
-            if tempFilePath and os.path.exists(tempFilePath):
-                try:
-                    os.remove(tempFilePath)
-                    print(f"Removed temporary file: {tempFilePath}")
-                except Exception as e:
-                    print(f"WARNING: Failed to remove temporary file {tempFilePath}: {e}")
+            # Catch errors during transcription OR text extraction
+            logger.error(f"Error during NeMo transcription/processing: {e}", exc_info=True)
+            transcriptionText = None  # Indicate failure
 
-        return transcription  # Return text string or None on error
+        return transcriptionText  # Return the extracted text string or None on error
 
 
 # Global handler instance (initialized later based on args)
@@ -213,10 +260,14 @@ nemoHandler = None
 def getStatus():
     """Endpoint to check if the NeMo model is loaded."""
     if not nemoHandler:
+        logger.error("Status request failed: Server handler not initialized.")
         return jsonify({"status": "error", "message": "Server handler not initialized"}), 500
+
     isLoaded = nemoHandler.modelLoaded
+    status_str = "loaded" if isLoaded else "unloaded"
+    logger.info(f"Status request: Model='{nemoHandler.modelName}', Status='{status_str}'")
     return jsonify({
-        "status": "loaded" if isLoaded else "unloaded",
+        "status": status_str,
         "modelName": nemoHandler.modelName,
         "device": str(nemoHandler.device)
     }), 200
@@ -226,91 +277,132 @@ def getStatus():
 def loadModel():
     """Endpoint to explicitly trigger loading the NeMo model."""
     if not nemoHandler:
+        logger.error("Load request failed: Server handler not initialized.")
         return jsonify({"status": "error", "message": "Server handler not initialized"}), 500
+
     if nemoHandler.modelLoaded:
+        logger.warning(
+            f"Load request received but model '{nemoHandler.modelName}' is already loaded.")
         return jsonify({"status": "loaded", "message": "Model already loaded",
                         "modelName": nemoHandler.modelName}), 200
 
-    print("Received request to load model...")
+    logger.info(f"Received request to load model '{nemoHandler.modelName}'...")
     success = nemoHandler.loadModel()
     if success:
         return jsonify({"status": "loaded", "message": "Model loaded successfully",
                         "modelName": nemoHandler.modelName}), 200
     else:
+        # Error logged by loadModel method
         return jsonify({"status": "error", "message": "Failed to load model",
-                        "modelName": nemoHandler.modelName}), 500
+                        "modelName": nemoHandler.modelName}), 500  # Internal Server Error
 
 
 @app.route('/unload', methods=['POST'])
 def unloadModel():
     """Endpoint to explicitly trigger unloading the NeMo model."""
     if not nemoHandler:
+        logger.error("Unload request failed: Server handler not initialized.")
         return jsonify({"status": "error", "message": "Server handler not initialized"}), 500
+
     if not nemoHandler.modelLoaded:
+        logger.warning("Unload request received but model is already unloaded.")
         return jsonify({"status": "unloaded", "message": "Model already unloaded",
                         "modelName": nemoHandler.modelName}), 200
 
-    print("Received request to unload model...")
+    logger.info(f"Received request to unload model '{nemoHandler.modelName}'...")
     success = nemoHandler.unloadModel()
     if success:
         return jsonify({"status": "unloaded", "message": "Model unloaded successfully",
                         "modelName": nemoHandler.modelName}), 200
     else:
-        # Unload shouldn't usually fail unless mid-operation?
+        logger.error("An issue occurred during model unload.")
         return jsonify({"status": "error", "message": "An issue occurred during unload",
-                        "modelName": nemoHandler.modelName}), 500
+                        "modelName": nemoHandler.modelName}), 500  # Internal Server Error
 
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
-    """Endpoint to receive audio data and return transcription."""
+    """Endpoint to receive audio data and target language, returns transcription."""
     global nemoHandler  # Ensure we are using the global handler
-
+    endpointStartTime = time.time()  # camelCase variable name
     if not nemoHandler:
+        logger.error("Transcribe request failed: Server handler not initialized.")
         return jsonify({"status": "error", "message": "Server handler not initialized"}), 500
 
     # --- Ensure Model is Loaded ---
     if not nemoHandler.modelLoaded:
-        print("Transcription request received, but model not loaded. Attempting to load...")
-        loadSuccess = nemoHandler.loadModel()
-        if not loadSuccess:
-            return jsonify({"status": "error",
-                            "message": "Model is not loaded and failed to load"}), 503  # Service Unavailable
+        logger.error(
+            "Transcription request received, but model is not loaded. Please use /load first.")
+        return jsonify({"status": "error",
+                        "message": "Model is not loaded. Use /load endpoint."}), 503  # Service Unavailable
 
     # --- Get Data from Request ---
     if 'audio_data' not in request.files:
-        return jsonify({"status": "error", "message": "Missing 'audio_data' in request files"}), 400
+        logger.error("Transcribe request failed: Missing 'audio_data' in request files.")
+        return jsonify({"status": "error",
+                        "message": "Missing 'audio_data' in request files"}), 400  # Bad Request
 
     audioFile = request.files['audio_data']
     audioBytes = audioFile.read()
 
+    # Get sample rate
+    sampleRateStr = request.args.get('sample_rate')
+    if not sampleRateStr:
+        logger.error("Transcribe request failed: Missing 'sample_rate' query parameter.")
+        return jsonify({"status": "error",
+                        "message": "Missing 'sample_rate' query parameter"}), 400  # Bad Request
     try:
-        sampleRate = int(request.args.get('sample_rate'))
-        if not sampleRate:
-            raise ValueError("Missing or invalid 'sample_rate' query parameter")
-    except (TypeError, ValueError) as e:
-        return jsonify({"status": "error", "message": f"Invalid sample rate: {e}"}), 400
+        sampleRate = int(sampleRateStr)
+    except (TypeError, ValueError):
+        logger.error(
+            f"Transcribe request failed: Invalid 'sample_rate' query parameter '{sampleRateStr}'. Must be integer.")
+        return jsonify({"status": "error",
+                        "message": "Invalid 'sample_rate', must be an integer"}), 400  # Bad Request
 
+    # Get target language (NEW)
+    targetLang = request.args.get('target_lang')
+    if not targetLang:
+        # Return 400 Bad Request if target_lang is missing, as Canary requires it
+        logger.error("Transcribe request failed: Missing 'target_lang' query parameter.")
+        return jsonify({"status": "error",
+                        "message": "Missing 'target_lang' query parameter"}), 400  # Bad Request
+
+    # Check if audio data is empty after reading
     if not audioBytes:
-        return jsonify({"status": "error", "message": "Received empty audio data"}), 400
+        logger.warning("Received empty audio data in transcribe request.")
+        # Return empty transcription for empty audio, which is a valid scenario
+        return jsonify({"transcription": ""}), 200
 
-    print(f"Received transcription request: {len(audioBytes)} bytes, Sample Rate: {sampleRate}Hz")
+    logger.info(
+        f"Received transcription request: {len(audioBytes)} bytes, Rate: {sampleRate}Hz, Lang: {targetLang}")
 
     # --- Perform Transcription ---
-    resultText = nemoHandler.transcribeAudioData(audioBytes, sampleRate)
+    # Call the updated handler function which now accepts targetLang
+    # and handles the Hypothesis object internally
+    resultText = nemoHandler.transcribeAudioData(audioBytes, sampleRate, targetLang)
 
+    # --- Process Result ---
+    # The handler function returns None only on critical errors.
+    # It returns "" if transcription was successful but yielded no text (e.g., silence).
     if resultText is not None:
-        print(f"Sending transcription result: '{resultText[:100]}...'")
+        logger.info(f"Sending transcription result: '{resultText[:100]}...'")
+        endpointDuration = time.time() - endpointStartTime  # camelCase variable name
+        logger.info(f"/transcribe endpoint processed in {endpointDuration:.3f} seconds")
+        # Return the transcription (which might be an empty string)
         return jsonify({"transcription": resultText}), 200
     else:
-        # Error occurred during transcription (already logged by handler)
-        return jsonify({"status": "error", "message": "Transcription failed on server"}), 500
+        # A critical error occurred during transcription (already logged by handler)
+        logger.error("Transcription failed on server during processing.")
+        # Return 500 Internal Server Error
+        return jsonify({"status": "error",
+                        "message": "Transcription failed on server"}), 500  # Internal Server Error
 
 
 # --- Main Execution ---
 if __name__ == "__main__":
     if not nemoAvailable:
-        print("Exiting: NeMo toolkit is required but not available.")
+        # Critical log already happened during import attempt
+        print("Exiting: NeMo toolkit is required but not available.", file=sys.stderr)
         exit(1)
 
     parser = argparse.ArgumentParser(description="NeMo ASR Model Server for WSL")
@@ -326,27 +418,32 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Initialize the global handler
-    nemoHandler = NemoServerModelHandler(args.model_name)
+    try:
+        nemoHandler = NemoServerModelHandler(args.model_name)
+    except Exception as handler_init_e:
+        logger.critical(f"Failed to initialize NemoServerModelHandler: {handler_init_e}",
+                        exc_info=True)
+        exit(1)
 
     # Optionally load model on startup
     if args.load_on_start:
-        print("Attempting to load model on server startup...")
-        nemoHandler.loadModel()  # Attempt load, ignore failure for now, endpoint can retry
+        logger.info("Attempting to load model on server startup as requested...")
+        nemoHandler.loadModel()  # Attempt load, logs errors internally
 
-    print(f"Starting NeMo ASR server for model '{args.model_name}' on {args.host}:{args.port}")
-    print("Endpoints:")
-    print("  GET /status")
-    print("  POST /load")
-    print("  POST /unload")
-    print("  POST /transcribe (expects 'audio_data' file and 'sample_rate' query param)")
+    logger.info(
+        f"Starting NeMo ASR server for model '{args.model_name}' on {args.host}:{args.port}")
+    logger.info("Endpoints available at /status, /load, /unload, /transcribe")
 
     # Run the Flask app
-    # Use Flask's development server (suitable for this use case)
-    # Consider using a more robust server like gunicorn for production if needed
-    app.run(host=args.host, port=args.port, debug=False)  # Turn debug off for default
-
-    # Cleanup (though usually interrupted)
-    print("Server shutting down...")
-    if nemoHandler:
-        nemoHandler.unloadModel()  # Attempt to unload model on shutdown
-    print("Server stopped.")
+    try:
+        # Use Flask's development server (suitable for this internal use case)
+        app.run(host=args.host, port=args.port, debug=False)  # Turn Flask debug off for stability
+    except Exception as flask_e:
+        logger.critical(f"Flask server failed to run: {flask_e}", exc_info=True)
+    finally:
+        # Cleanup attempt (though usually interrupted by Ctrl+C)
+        logger.info("Server shutting down...")
+        if nemoHandler:
+            nemoHandler.unloadModel()  # Attempt to unload model on shutdown
+        logger.info("Server stopped.")
+        logging.shutdown()  # Flush and close log handlers

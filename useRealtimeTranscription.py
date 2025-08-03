@@ -22,7 +22,6 @@ userSettings = {
     "wslServerUrl": "http://localhost:5001",  # URL where wslNemoServer.py listens
     "wslDistributionName": "Ubuntu-22.04",
     # *** CHANGE THIS to your actual WSL distribution name (e.g., Ubuntu, Debian) *** Use `wsl -l` in CMD to check.
-    "wslUseSudo": True,
     "serverRequestTimeout": 15.0,  # Seconds client waits for server response before timeout
     "unloadRemoteModelOnExit": True,
     # Ask WSL server to unload model when this app closes? Set to False if server should persist.
