@@ -101,23 +101,54 @@ class BaseTranscriber:
         Transcribe audio data using the loaded model.
 
         Args:
-            audioData (numpy.ndarray): Audio data to transcribe
-            sampleRate (int): Sample rate of the audio data
+            audioData (numpy.ndarray): Audio data (as float32 NumPy array).
+            sampleRate (int): Sample rate of the audio data (e.g., 16000).
 
         Returns:
-            str: Transcribed text
+            str: The transcribed text. Returns an empty string if transcription fails
+                 or the model is not loaded.
         """
         if not self.modelLoaded:
-            self.loadModel()
+            self._debugPrint("Transcription skipped: Model not loaded.")
+            return ""  # Return empty if model isn't loaded
 
-        if len(audioData.shape) > 1:
-            audioData = np.mean(audioData, axis=1)
+        if len(audioData.shape) > 1 and audioData.shape[1] > 1:
+            if self.debugPrint:
+                print(f"DEBUG: Converting stereo audio (shape {audioData.shape}) to mono.")
+            audioData = np.mean(audioData, axis=1)  # Average channels for mono
 
-        result = self.asr({"raw": audioData, "sampling_rate": sampleRate})
-        transcription = result["text"]
+        if audioData.dtype != np.float32:
+            self._debugPrint(
+                f"DEBUG: Converting audio data type from {audioData.dtype} to float32.")
+            audioData = audioData.astype(np.float32)
 
-        if self.removeTrailingDots:
-            transcription = transcription.rstrip('.')
+        transcription = ""  # Default empty transcription
+        try:
+            asr_input = {"raw": audioData, "sampling_rate": sampleRate}
+            self._debugPrint(
+                f"DEBUG: Sending {len(audioData) / sampleRate:.2f}s audio to ASR pipeline...")
+            result = self.asr(asr_input)
+            self._debugPrint("DEBUG: ASR pipeline processing finished.")
+
+            self._debugPrint(f"ASR Raw Result: {result}")
+
+            if isinstance(result, dict) and "text" in result:
+                transcription = result["text"]
+            else:
+                print(
+                    f"Warning: Unexpected ASR result structure: {type(result)}. Could not extract text.")
+                transcription = ""  # Assign empty string if text cannot be found
+
+            if self.removeTrailingDots and isinstance(transcription, str):
+                transcription = transcription.strip('. ')  # Also strip leading/trailing spaces
+
+        except Exception as e:
+            print(f"!!! ERROR during transcription: {e}")
+            transcription = ""  # Return empty string on error
+
+        if self.debugPrint:
+            print(
+                f"DEBUG: Transcription result (cleaned): '{transcription[:100]}...'")  # Print start of result
 
         return transcription
 
@@ -688,7 +719,7 @@ if __name__ == "__main__":
             modelName="openai/whisper-large-v3",
             transcriptionMode="busyContinuous",
             transcriptionInterval=4,  # Still relevant for constantInterval mode timing
-            busyContinuousTime=1.4,  # Still relevant for busyContinuous mode timing
+            busyContinuousTime=5.8,  # Still relevant for busyContinuous mode timing
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=3.0,
             lowLoudnessSkip_threshold=0.0002,
