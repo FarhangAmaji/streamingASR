@@ -1,5 +1,4 @@
 # audioProcesses.py
-
 # ==============================================================================
 # Audio Input Handling and Real-Time Processing
 # ==============================================================================
@@ -11,11 +10,9 @@
 #   trigger logic based on selected mode (dictation or constant interval),
 #   and prepares audio segments for the ASR handler.
 # ==============================================================================
-
 import queue
+import sys  # Needed for stderr print during early error
 import time
-import logging  # Needed for checking log level
-import traceback  # For detailed error logging
 
 import numpy as np
 
@@ -32,7 +29,6 @@ except Exception as e:  # Catch other potential init errors
     sounddeviceAvailable = False
     # Log error here as logger might not be set up yet in main module
     print(f"ERROR: Failed to import or initialize sounddevice: {e}", file=sys.stderr)
-
 # Import logging helpers from utils
 from utils import logWarning, logDebug, logInfo, logError
 
@@ -49,7 +45,6 @@ class AudioHandler:
         self.audioQueue = queue.Queue()  # Queue for raw audio chunks from callback
         self.stream = None  # Holds the sounddevice InputStream object
         self.streamInfo = {}  # Store info about the active stream
-
         # Check dependency and perform initial device setup
         if not sounddeviceAvailable:
             logError(
@@ -80,21 +75,18 @@ class AudioHandler:
     def _setupDeviceInfo(self):
         """Queries audio device info and sets actual sample rate/channels in config."""
         if not sounddeviceAvailable: return
-
         self._printAudioDevices()  # Log available devices first
         deviceId = self.config.get('deviceId')  # Can be None, int, or string part
         requestedRate = self.config.get('sampleRate', 16000)
         requestedChannels = self.config.get('channels', 1)
         actualRate = requestedRate  # Default to requested
         actualChannels = requestedChannels  # Default to requested
-
         logDebug(
             f"Setting up device info. Requested Device ID: {deviceId}, Rate: {requestedRate}, Channels: {requestedChannels}")
         try:
             # Query device details based on the requested ID (or default if None)
             # sounddevice handles None deviceId to mean default input device
             deviceInfo = sd.query_devices(device=deviceId, kind='input')
-
             # deviceInfo can be dict or None if device not found/no input
             if isinstance(deviceInfo, dict):
                 logDebug(f"Device info found: {deviceInfo}")
@@ -102,7 +94,6 @@ class AudioHandler:
                 # Stick to requested rate unless known issues. Let's store device defaults though.
                 defaultRate = deviceInfo.get("default_samplerate")
                 maxInChannels = deviceInfo.get("max_input_channels")
-
                 # Validate requested channels against device max input channels
                 if maxInChannels is not None and requestedChannels > maxInChannels:
                     logWarning(
@@ -114,12 +105,10 @@ class AudioHandler:
                     actualChannels = 1
                 else:
                     actualChannels = requestedChannels  # Use requested if valid
-
                 # Let's use the requested sample rate for now, sounddevice will raise error if unsupported
                 actualRate = requestedRate
                 logInfo(
                     f"Selected Device: '{deviceInfo.get('name')}', Max Input Channels: {maxInChannels}, Default Rate: {defaultRate}")
-
             else:  # Device not found or no default input
                 logWarning(
                     f"Could not retrieve detailed info for requested device ID '{deviceId}'. Using configured defaults or system default.")
@@ -127,7 +116,6 @@ class AudioHandler:
                 actualRate = requestedRate
                 actualChannels = requestedChannels
                 if actualChannels < 1: actualChannels = 1  # Ensure at least 1 channel
-
         except ValueError as e:
             # sd.query_devices raises ValueError if device ID is invalid format or not found
             logError(f"Error querying audio device '{deviceId}': {e}. Check device ID/name.")
@@ -142,7 +130,6 @@ class AudioHandler:
             actualRate = requestedRate
             actualChannels = requestedChannels
             if actualChannels < 1: actualChannels = 1
-
         # Store the determined 'actual' values back into configuration for other components
         self.config.set('actualSampleRate', actualRate)
         self.config.set('actualChannels', actualChannels)
@@ -172,7 +159,6 @@ class AudioHandler:
                         f"Audio callback received status flags object (type: {type(status)}), but sounddevice module (sd) might be unavailable.")
             except Exception as e:
                 logWarning(f"Error processing audio callback status flags: {e}")
-
         # Add data to queue only if application logic wants recording active
         if self.stateManager and self.stateManager.isRecording():
             # indata is a numpy array. Make a copy to avoid issues if sounddevice reuses buffer.
@@ -196,28 +182,22 @@ class AudioHandler:
         if not sounddeviceAvailable:
             logError("Cannot start audio stream: sounddevice library not available.")
             return False
-
         if self.stream is not None and self.stream.active:
             logDebug("Audio stream is already active.")
             return True  # Already running
-
         # Ensure previous stream (if any) is properly closed before starting new one
         if self.stream is not None:
             self.stopStream()  # Attempt cleanup of previous stream
-
         try:
             # Get configured parameters
             rate = self.config.get('actualSampleRate')
             channels = self.config.get('actualChannels')
             deviceId = self.config.get('deviceId')  # Can be None
             blockSize = self.config.get('blockSize', 0)  # 0 lets sounddevice choose optimal
-
             logInfo(
                 f"Attempting to start audio stream (Device: {deviceId or 'Default'}, Rate: {rate}, Channels: {channels}, BlockSize: {blockSize or 'Auto'})...")
-
             # Clear the queue before starting
             self.clearQueue()
-
             self.stream = sd.InputStream(
                 samplerate=rate,
                 channels=channels,
@@ -238,7 +218,6 @@ class AudioHandler:
             logInfo(
                 f"Audio stream started successfully on device {self.streamInfo['device']} ({self.streamInfo}).")
             return True
-
         except sd.PortAudioError as pae:
             logError(
                 f"PortAudioError starting stream: {pae}. Is a microphone connected and configured?")
@@ -339,11 +318,11 @@ class RealTimeAudioProcessor:
         if audioChunk.dtype.kind != 'f':
             # Basic normalization if int type (e.g., int16)
             if audioChunk.dtype.kind in ('i', 'u'):
-                max_val = np.iinfo(audioChunk.dtype).max
-                min_val = np.iinfo(audioChunk.dtype).min
-                if max_val > min_val:
-                    audioChunk = (audioChunk.astype(np.float32) - min_val) / (
-                            max_val - min_val) * 2.0 - 1.0
+                maxVal = np.iinfo(audioChunk.dtype).max
+                minVal = np.iinfo(audioChunk.dtype).min
+                if maxVal > minVal:
+                    audioChunk = (audioChunk.astype(np.float32) - minVal) / (
+                            maxVal - minVal) * 2.0 - 1.0
                 else:
                     audioChunk = audioChunk.astype(np.float32)
             else:
@@ -366,19 +345,17 @@ class RealTimeAudioProcessor:
         if audioChunk is None or audioChunk.size == 0:
             # logDebug("processIncomingChunk received empty chunk, skipping.") # Can be noisy
             return False  # No chunk processed
-
         processedChunk = audioChunk  # Start with the input chunk
-
         # --- Ensure Float32 Audio ---
         if processedChunk.dtype != np.float32:
             # logDebug(f"Chunk received with dtype {processedChunk.dtype}, converting to float32.") # Can be noisy
             try:
                 if processedChunk.dtype.kind in ('i', 'u'):
-                    max_val = np.iinfo(processedChunk.dtype).max
-                    min_val = np.iinfo(processedChunk.dtype).min
-                    if max_val > min_val:
-                        processedChunk = (processedChunk.astype(np.float32) - min_val) / (
-                                max_val - min_val) * 2.0 - 1.0
+                    maxVal = np.iinfo(processedChunk.dtype).max
+                    minVal = np.iinfo(processedChunk.dtype).min
+                    if maxVal > minVal:
+                        processedChunk = (processedChunk.astype(np.float32) - minVal) / (
+                                maxVal - minVal) * 2.0 - 1.0
                     else:
                         processedChunk = processedChunk.astype(np.float32)
                 else:
@@ -386,7 +363,6 @@ class RealTimeAudioProcessor:
             except Exception as e:
                 logError(f"Failed converting chunk to float32: {e}")
                 return False
-
         # --- Ensure Mono Audio ---
         numChannels = self.config.get('actualChannels', 1)
         if numChannels > 1:
@@ -396,23 +372,19 @@ class RealTimeAudioProcessor:
             elif len(processedChunk.shape) == 1 and numChannels > 1:
                 logWarning(
                     f"Received 1D audio data but expected {numChannels} channels. Proceeding as mono.")
-
         # --- Ensure processedChunk is 1D before concatenation ---
         if processedChunk.ndim > 1:
             # Example: Flatten a potential (N, 1) shape to (N,)
             # logDebug(f"Flattening processed chunk from {processedChunk.shape} to 1D.") # COMMENTED OUT - TOO NOISY
             processedChunk = processedChunk.flatten()
-
         # Ensure chunk is not empty after processing
         if processedChunk is None or processedChunk.size == 0:
             logWarning("Audio chunk became empty after processing (float/mono/flatten).")
             return False
-
         # --- Update Dictation Mode State (if applicable) ---
         if self.config.get('transcriptionMode') == "dictationMode":
             # Pass the potentially flattened chunk here
             self._updateDictationState(processedChunk)
-
         # --- Append Processed Chunk to Main Buffer ---
         try:
             # Now concatenation should work as both self.audioBuffer and processedChunk are 1D

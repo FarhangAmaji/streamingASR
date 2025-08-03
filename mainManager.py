@@ -126,7 +126,6 @@ class SpeechToTextOrchestrator:
         wslServerUrl = self.config.get('wslServerUrl')
         wslDistro = self.config.get('wslDistributionName')
         useSudo = self.config.get('wslUseSudo', False)  # Get setting from config
-
         # Check prerequisites
         if not wslServerUrl or not wslDistro:
             logError(
@@ -136,14 +135,12 @@ class SpeechToTextOrchestrator:
         if platform.system() != "Windows":
             logWarning("WSL launch command preparation skipped: Not running on Windows.")
             return
-
         try:
             # --- Get Port ---
             parsedUrl = urlparse(wslServerUrl)
             wslServerPort = parsedUrl.port
             if not wslServerPort:
                 raise ValueError(f"Could not extract port from wslServerUrl: {wslServerUrl}")
-
             # --- Find Script Path ---
             import __main__
             mainFilePath = None
@@ -155,11 +152,9 @@ class SpeechToTextOrchestrator:
                 logWarning(
                     "Could not reliably determine main script path (__main__.__file__ missing). Falling back to mainManager.py directory.")
                 scriptDir = Path(os.path.dirname(os.path.abspath(__file__)))
-
             wslServerScriptFilename = "wslNemoServer.py"
             wslServerScriptPathWindows = scriptDir / wslServerScriptFilename
             logDebug(f"Looking for WSL server script at: {wslServerScriptPathWindows}")
-
             if not wslServerScriptPathWindows.is_file():
                 cwd = Path.cwd()
                 fallbackPath = cwd / wslServerScriptFilename
@@ -170,16 +165,13 @@ class SpeechToTextOrchestrator:
                         f"WSL script '{wslServerScriptFilename}' not found in script dir ({scriptDir}) or CWD ({cwd}).")
                 wslServerScriptPathWindows = fallbackPath
                 logWarning(f"Using WSL server script from CWD: {wslServerScriptPathWindows}")
-
             logDebug(f"Found WSL server script (Windows path): {wslServerScriptPathWindows}")
-
             # --- Convert Path ---
             wslServerScriptPathWsl = convertWindowsPathToWsl(wslServerScriptPathWindows)
             if not wslServerScriptPathWsl:
                 raise ValueError(
                     f"Failed to convert Windows path to WSL path: {wslServerScriptPathWindows}")
             logDebug(f"Converted WSL server script path (WSL path): {wslServerScriptPathWsl}")
-
             # --- Construct Command List ---
             pythonExecutable = "/usr/bin/python3"  # Use full path for robustness
             # Base command to execute commands within the specified WSL distro
@@ -188,32 +180,26 @@ class SpeechToTextOrchestrator:
                 "-d", wslDistro,
                 "--"  # Separates wsl.exe options from the command to run inside WSL
             ]
-
             # Command sequence to run inside WSL
             commandInsideWsl = []
-
             # Optionally prepend sudo
             if useSudo:
                 logWarning("Config 'wslUseSudo' is True. Preparing command with 'sudo'.")
                 logWarning(
                     "--> CRITICAL: This requires passwordless sudo configured in WSL for the *exact* following command, otherwise launch WILL fail.")
                 commandInsideWsl.append("sudo")
-
             # Add Python executable and script path
             commandInsideWsl.append(pythonExecutable)
             # The script path is a single argument, even if it contains spaces (list item handles this)
             commandInsideWsl.append(wslServerScriptPathWsl)
-
             # Add script arguments
             commandInsideWsl.extend([
                 "--model_name", modelName,
                 "--port", str(wslServerPort),
                 "--load_on_start"  # Let the server handle this with background loading
             ])
-
             # Combine wsl.exe command with the command to run inside WSL
             preparedCommand = commandBase + commandInsideWsl
-
             # --- Assign and Log ---
             self.wslLaunchCommand = preparedCommand
             logInfo("Prepared WSL server launch command successfully.")
@@ -230,7 +216,6 @@ class SpeechToTextOrchestrator:
                         "Verify the command string above matches your passwordless sudo configuration exactly.")
             except Exception as eCmdline:
                 logWarning(f"Could not generate command string representation: {eCmdline}")
-
         except FileNotFoundError as e:
             logError(f"Error preparing WSL launch (FileNotFound): {e}")
             logError("WSL server will NOT be launched automatically.")
@@ -271,27 +256,27 @@ class SpeechToTextOrchestrator:
         unloadTimeoutStr = f"{unloadTimeout} s" if unloadTimeout > 0 else "Disabled"
         maxProgramStr = f"{maxProgram} s" if maxProgram > 0 else "Unlimited"
         # Build log message string
-        log_message = "\n--- Application Setup ---\n"
-        log_message += f"Mode:                 {mode}\n"
-        log_message += f"ASR Model:            {modelName}\n"
-        log_message += f"  Handler:            {handlerType}\n"
-        log_message += f"  Target Device:      {deviceStr}\n"
+        logMessage = "\n--- Application Setup ---\n"
+        logMessage += f"Mode:                 {mode}\n"
+        logMessage += f"ASR Model:            {modelName}\n"
+        logMessage += f"  Handler:            {handlerType}\n"
+        logMessage += f"  Target Device:      {deviceStr}\n"
         if handlerType == 'RemoteNemoClientHandler':
-            log_message += f"  WSL Server URL:     {self.config.get('wslServerUrl', 'Not Set!')}\n"
-            log_message += f"  WSL Distro:         {self.config.get('wslDistributionName', 'Not Set!')}\n"
-            log_message += f"  WSL Use Sudo:       {self.config.get('wslUseSudo', False)}\n"
-        log_message += f"Audio Device:         ID={devId}, Rate={rate}Hz, Channels={ch}\n"
-        log_message += f"--- Hotkeys ---\n"
-        log_message += f"Toggle Recording:     '{recKey}'\n"
-        log_message += f"Toggle Text Output:   '{outKey}' (Method: {self.systemInteractionHandler.textOutputMethod})\n"
-        log_message += f"--- Timeouts ---\n"
-        log_message += f"Max Recording:        {maxRecStr}\n"
-        log_message += f"Stop Rec After Idle:  {idleTimeStr}\n"
-        log_message += f"Unload Model Inactive:{unloadTimeoutStr}\n"
-        log_message += f"Program Auto-Exit:    {maxProgramStr}\n"
-        log_message += f"-------------------------"
+            logMessage += f"  WSL Server URL:     {self.config.get('wslServerUrl', 'Not Set!')}\n"
+            logMessage += f"  WSL Distro:         {self.config.get('wslDistributionName', 'Not Set!')}\n"
+            logMessage += f"  WSL Use Sudo:       {self.config.get('wslUseSudo', False)}\n"
+        logMessage += f"Audio Device:         ID={devId}, Rate={rate}Hz, Channels={ch}\n"
+        logMessage += f"--- Hotkeys ---\n"
+        logMessage += f"Toggle Recording:     '{recKey}'\n"
+        logMessage += f"Toggle Text Output:   '{outKey}' (Method: {self.systemInteractionHandler.textOutputMethod})\n"
+        logMessage += f"--- Timeouts ---\n"
+        logMessage += f"Max Recording:        {maxRecStr}\n"
+        logMessage += f"Stop Rec After Idle:  {idleTimeStr}\n"
+        logMessage += f"Unload Model Inactive:{unloadTimeoutStr}\n"
+        logMessage += f"Program Auto-Exit:    {maxProgramStr}\n"
+        logMessage += f"-------------------------"
         # Log the entire block as one INFO message
-        logInfo(log_message)
+        logInfo(logMessage)
 
     def _launchWslServer(self) -> bool:
         """
@@ -306,7 +291,6 @@ class SpeechToTextOrchestrator:
             # Command preparation failed or skipped, error already logged.
             logWarning("WSL server launch command not available. Skipping automatic launch.")
             return False
-
         # Check if we already have a process handle and if it's still running
         if self.wslServerProcess and self.wslServerProcess.poll() is None:
             # Process exists from a previous attempt/run
@@ -326,16 +310,13 @@ class SpeechToTextOrchestrator:
                 # Terminate the potentially defunct existing process before trying to launch a new one
                 self._terminateWslServer()
                 # Proceed to launch a new instance below
-
         # Ensure we are on Windows before trying to execute wsl.exe
         if platform.system() != "Windows":
             logError("WSL server launch skipped: Cannot execute wsl.exe on non-Windows platform.")
             return False
-
         logInfo(f"Attempting to launch WSL server...")
         # Log the exact command list being passed to Popen again for clarity during launch
         logDebug(f"Executing Popen with command list: {self.wslLaunchCommand}")
-
         try:
             # Options to make the subprocess less intrusive on Windows
             creationFlags = 0
@@ -345,7 +326,6 @@ class SpeechToTextOrchestrator:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
-
             # Launch the WSL command using Popen
             # CRITICAL: Redirect stderr to stdout to capture errors (including sudo prompts or Python tracebacks)
             # Use text mode and UTF-8 encoding for reliable output reading
@@ -361,13 +341,10 @@ class SpeechToTextOrchestrator:
                 startupinfo=startupinfo,
                 bufsize=1  # Line buffering
             )
-
             logInfo(
                 f"WSL server process launched (PID: {self.wslServerProcess.pid}). Waiting for server reachability...")
-
             # Wait for the server to become *reachable* (Flask running)
             serverReadyTimeout = self.config.get('wslServerReadyTimeout', 90.0)
-
             if serverReadyTimeout <= 0:
                 # Polling disabled - highly unreliable, use only for debugging specific issues
                 logWarning(
@@ -387,11 +364,9 @@ class SpeechToTextOrchestrator:
                     self._logWslProcessOutputOnError()
                     self.wslServerProcess = None  # Clear handle
                     return False  # Failed
-
             # Wait for reachability, checking process status before network poll
             isReachable = self._waitForServerReachable(serverReadyTimeout,
                                                        checkProcessFirst=True)  # Use reachability check
-
             if isReachable:
                 logInfo(f"WSL server became reachable within {serverReadyTimeout}s timeout.")
                 # Model is NOT necessarily loaded yet, just the server is running Flask
@@ -414,7 +389,6 @@ class SpeechToTextOrchestrator:
                     self.wslServerProcess = None  # Clear handle
                 # If self.wslServerProcess is already None, _waitForServerReachable handled it.
                 return False  # Indicate launch/reachability failure
-
         except FileNotFoundError:
             # This error usually means 'wsl.exe' wasn't found in the system PATH
             logError(
@@ -450,7 +424,6 @@ class SpeechToTextOrchestrator:
         """
         startTime = time.time()
         pollingInterval = 2.0  # How often to poll
-
         if not isinstance(self.asrModelHandler, RemoteNemoClientHandler):
             logError("Cannot wait for server reachable: Incorrect ASR handler type.")
             return False
@@ -459,17 +432,14 @@ class SpeechToTextOrchestrator:
             logError(
                 "Cannot wait for server reachable: WSL process handle is None (launch may have failed).")
             return False
-
         # Get PID early for consistent logging, handle potential immediate exit race condition
         try:
             pid = self.wslServerProcess.pid
         except Exception:
             pid = "N/A (process exited)"
             logWarning("Could not get PID, WSL process may have exited very quickly.")
-
         logDebug(
             f"Waiting up to {timeoutSeconds:.1f}s for WSL server (PID: {pid}) to become reachable...")
-
         while True:
             elapsedTime = time.time() - startTime
             # Check 1: Timeout
@@ -477,7 +447,6 @@ class SpeechToTextOrchestrator:
                 logWarning(
                     f"Timeout ({timeoutSeconds}s) waiting for WSL server reachability (PID: {pid}).")
                 return False  # Timed out
-
             # Check 2: Process Exit (Conditional based on checkProcessFirst)
             if checkProcessFirst:
                 processExitCode = self.wslServerProcess.poll()
@@ -488,7 +457,6 @@ class SpeechToTextOrchestrator:
                     self._logWslProcessOutputOnError()
                     self.wslServerProcess = None  # Clear handle since it exited
                     return False  # Server definitely not reachable if process died
-
             # Check 3: Network Status Poll via Handler
             logDebug(
                 f"Polling WSL server /status for reachability (PID: {pid})... (Elapsed: {elapsedTime:.1f}s)")
@@ -497,14 +465,12 @@ class SpeechToTextOrchestrator:
             # The method internally updates self.asrModelHandler.serverReachable.
             # Ignore the boolean return value (isLoaded) for this reachability check.
             _ = self.asrModelHandler.checkServerStatus(forceCheck=True)
-
             # Check the internal state updated by checkServerStatus
             if self.asrModelHandler.serverReachable is True:
                 # If the request succeeded (no connection error, no timeout, no HTTP error)
                 # then the Flask server is up and running.
                 logDebug(f"Server /status check successful (server is reachable) (PID: {pid}).")
                 return True  # Server is reachable!
-
             elif self.asrModelHandler.serverReachable is False:
                 # checkServerStatus failed with a connection/network error.
                 logWarning(f"Server confirmed unreachable during reachability check (PID: {pid}).")
@@ -517,10 +483,8 @@ class SpeechToTextOrchestrator:
                     self.wslServerProcess = None
                 # Return False as it's not reachable
                 return False
-
             # If checkServerStatus failed but didn't set serverReachable to False
             # (e.g., Timeout, HTTP 5xx error from server), continue polling.
-
             # Check 4: Process Exit (After Network Poll or if checkProcessFirst was False)
             # Catch cases where process exits between polls or after network attempt fails without ConnectionError
             if not checkProcessFirst:
@@ -531,7 +495,6 @@ class SpeechToTextOrchestrator:
                     self._logWslProcessOutputOnError()
                     self.wslServerProcess = None
                     return False  # Server definitely not reachable
-
             # --- Wait before the next poll ---
             logDebug(f"Server not reachable yet (PID: {pid}), waiting {pollingInterval}s...")
             time.sleep(pollingInterval)
@@ -541,15 +504,12 @@ class SpeechToTextOrchestrator:
         if not self.wslServerProcess:
             logDebug("Skipping reading WSL output: process handle is None.")
             return
-
         # Store PID for logging, handle potential early exit
         try:
             pid = self.wslServerProcess.pid
         except Exception:
             pid = "N/A (process exited)"
-
         logInfo(f"Attempting to read stdout/stderr from failed/exited WSL process (PID: {pid})...")
-
         outputLogged = False
         try:
             # communicate() reads *all* remaining buffered output until EOF and waits (with timeout).
@@ -557,7 +517,6 @@ class SpeechToTextOrchestrator:
             # has exited or failed, as direct reads on pipes might miss data or block.
             stdoutData, _ = self.wslServerProcess.communicate(
                 timeout=2.0)  # Use a slightly longer timeout
-
             if stdoutData and stdoutData.strip():
                 logError(f"--- Captured WSL Server stdout/stderr (PID: {pid}) ---")
                 # Log line by line for better readability in logs
@@ -580,11 +539,9 @@ class SpeechToTextOrchestrator:
                 if "Address already in use" in stdoutData:
                     logError(
                         "!!! Detected 'Address already in use' in WSL output. Check port 5001 in WSL (`netstat -tulnp | grep 5001`).")
-
                 outputLogged = True
             else:
                 logDebug(f"WSL process {pid} communicate() returned no stdout/stderr data.")
-
         except subprocess.TimeoutExpired:
             logWarning(
                 f"Timeout waiting for WSL process {pid} output via communicate(). Output may be incomplete.")
@@ -594,7 +551,6 @@ class SpeechToTextOrchestrator:
         except Exception as readError:
             logWarning(
                 f"Exception reading WSL process stdout/stderr for PID {pid} via communicate(): {readError}")
-
         # Fallback: If communicate failed/timed out, maybe try a non-blocking read? (Less reliable)
         if not outputLogged and self.wslServerProcess and self.wslServerProcess.stdout and not self.wslServerProcess.stdout.closed:
             logDebug(f"Attempting fallback non-blocking read for WSL process {pid}...")
@@ -607,7 +563,6 @@ class SpeechToTextOrchestrator:
                     outputLogged = True
             except Exception as fallbackReadError:
                 logWarning(f"Fallback read for WSL process {pid} failed: {fallbackReadError}")
-
         if not outputLogged:
             logWarning(f"No stdout/stderr captured or logged from WSL process {pid}.")
 
@@ -616,15 +571,12 @@ class SpeechToTextOrchestrator:
         if not self.wslServerProcess:
             logDebug("No WSL server process handle found to terminate.")
             return
-
         # Store PID for logging, handle potential early exit
         try:
             pid = self.wslServerProcess.pid
         except Exception:
             pid = "N/A (process exited before term)"
-
         processExitCode = self.wslServerProcess.poll()  # Check status first
-
         if processExitCode is None:  # Process is still running
             logInfo(f"Attempting to terminate running WSL server process (PID: {pid})...")
             try:
@@ -668,7 +620,6 @@ class SpeechToTextOrchestrator:
             logInfo(
                 f"Launched WSL server process (PID: {pid}) was already finished (exit code {processExitCode}). Logging output.")
             self._logWslProcessOutputOnError()  # Log output
-
         # Always clear the handle after attempting termination/logging
         self.wslServerProcess = None
         logDebug("Cleared WSL server process handle.")
@@ -719,7 +670,8 @@ class SpeechToTextOrchestrator:
             except queue.Empty:
                 continue
             except Exception as e:
-                logError(f"!!! ERROR in Transcription Worker: {e}", exc_info=True); time.sleep(1)
+                logError(f"!!! ERROR in Transcription Worker: {e}", exc_info=True);
+                time.sleep(1)
         logInfo("Transcription Worker thread stopping.")
 
     def _startBackgroundThreads(self):
@@ -731,7 +683,8 @@ class SpeechToTextOrchestrator:
         def threadWrapper(targetFunc, threadName, *args, **kwargs):
             logDebug(f"Thread '{threadName}' starting...")
             try:
-                targetFunc(*args, **kwargs); logDebug(f"Thread '{threadName}' finished normally.")
+                targetFunc(*args, **kwargs);
+                logDebug(f"Thread '{threadName}' finished normally.")
             except Exception as e:
                 logError(f"!!! EXCEPTION in thread '{threadName}': {e}", exc_info=True)
                 if threadName in ["KeyboardMonitorThread", "TranscriptionWorkerThread"]:
@@ -743,7 +696,7 @@ class SpeechToTextOrchestrator:
 
         threadTargets = {
             "KeyboardMonitorThread": (
-            self.systemInteractionHandler.monitorKeyboardShortcuts, (self,)),
+                self.systemInteractionHandler.monitorKeyboardShortcuts, (self,)),
             "ModelManagerThread": (self.modelLifecycleManager.manageModelLifecycle, ()),
             "TranscriptionWorkerThread": (self._transcriptionWorkerLoop, ()),
         }
@@ -752,10 +705,14 @@ class SpeechToTextOrchestrator:
             try:
                 thread = threading.Thread(target=threadWrapper,
                                           args=(target, threadName) + targetArgs, name=threadName,
-                                          daemon=True); self.threads.append(
-                    thread); thread.start(); logDebug(f"Thread '{threadName}' initiated.")
+                                          daemon=True);
+                self.threads.append(
+                    thread);
+                thread.start();
+                logDebug(f"Thread '{threadName}' initiated.")
             except Exception as e:
-                logError(f"Failed start thread '{threadName}': {e}"); failedThreads.append(
+                logError(f"Failed start thread '{threadName}': {e}");
+                failedThreads.append(
                     threadName)
         time.sleep(0.1);
         activeThreads = [t for t in self.threads if t.is_alive()];
@@ -790,7 +747,8 @@ class SpeechToTextOrchestrator:
     def toggleOutput(self):
         """Toggles the text output state. Called by systemInteractionHandler via hotkey."""
         if not all(
-            [self.stateManager, self.systemInteractionHandler, self.realTimeProcessor]): logError(
+                [self.stateManager, self.systemInteractionHandler,
+                 self.realTimeProcessor]): logError(
             "Cannot toggle output: components missing."); return
         newState = self.stateManager.toggleOutput()
         playEnable = self.config.get('playEnableSounds', False)
@@ -807,7 +765,8 @@ class SpeechToTextOrchestrator:
         logInfo("Initiating orchestrator cleanup...")
         if self.stateManager: self.stateManager.stopProgram(); logDebug("Stop signaled.")
         try:
-            self.transcriptionRequestQueue.put(None, block=True, timeout=0.5); logDebug(
+            self.transcriptionRequestQueue.put(None, block=True, timeout=0.5);
+            logDebug(
                 "Sent sentinel.")
         except Exception as e:
             logWarning(f"Error putting sentinel: {e}")
@@ -833,7 +792,7 @@ class SpeechToTextOrchestrator:
         logInfo("Cleanup complete.")
 
     # ---- Main Loop Sub-methods for Clarity ----
-    def _run_initialSetup(self):
+    def _runInitialSetup(self):
         """Handle initial setup: Launch WSL server if needed, check reachability, load model, start threads & audio stream."""
         logInfo("Running initial setup...")
         # --- Launch WSL Server If Required ---
@@ -848,7 +807,6 @@ class SpeechToTextOrchestrator:
                     "Automatic WSL NeMo server launch/reachability check failed. Remote transcription requires manual server start.")
             else:
                 logInfo("WSL Server is reachable. Proceeding with model load check/trigger.")
-
         # --- Initial Model Load Check/Attempt ---
         # This happens AFTER confirming server reachability (for remote) or immediately (for local)
         if serverReachable:  # Only attempt load if server is reachable (for remote) or if local
@@ -880,14 +838,12 @@ class SpeechToTextOrchestrator:
         else:
             # Server wasn't reachable, cannot proceed with load attempt
             logWarning("Skipping initial model load attempt as server was not reachable.")
-
         # --- Start Background Threads ---
         # Only start threads if the program hasn't been stopped by a critical failure above
         if self.stateManager.shouldProgramContinue():
             self._startBackgroundThreads()
         else:
             logWarning("Skipping background thread start due to earlier critical error.")
-
         # --- Initial Audio Stream Start ---
         initialStreamStarted = False
         # Only start if program is still running and recording is initially enabled
@@ -899,10 +855,9 @@ class SpeechToTextOrchestrator:
                 self.stateManager.stopRecording()
         elif self.stateManager.shouldProgramContinue():
             logInfo("Initial state is not recording, audio stream will start when toggled on.")
-
         logInfo("Initial setup phase complete.")
 
-    def _run_checkTimeoutsNGlobalState(self):
+    def _runCheckTimeoutsAndGlobalState(self):
         """Check program/recording timeouts, manage global state."""
         if not all([self.stateManager, self.realTimeProcessor]): return True
         if self.stateManager.checkProgramTimeout(): return False
@@ -912,7 +867,7 @@ class SpeechToTextOrchestrator:
                 self.toggleRecording()
         return True
 
-    def _run_manageAudioStreamLifecycle(self):
+    def _runManageAudioStreamLifecycle(self):
         """Start/stop audio stream based on the desired recording state."""
         if not all([self.stateManager, self.audioHandler]): return True
         shouldRecord = self.stateManager.isRecording()
@@ -926,10 +881,11 @@ class SpeechToTextOrchestrator:
                 if self.audioHandler: self.audioHandler.clearQueue()
         except Exception as e:
             logError(f"Audio stream lifecycle error: {e}",
-                     exc_info=True); self.stateManager.stopRecording()
+                     exc_info=True);
+            self.stateManager.stopRecording()
         return True
 
-    def _run_processAudioChunks(self):
+    def _runProcessAudioChunks(self):
         """Dequeue and process audio chunks."""
         if not all([self.stateManager, self.audioHandler, self.realTimeProcessor]): return False
         processed = False
@@ -945,7 +901,7 @@ class SpeechToTextOrchestrator:
                 count += 1
         return processed
 
-    def _run_queueTranscriptionRequest(self, audioProcessed):
+    def _runQueueTranscriptionRequest(self, audioProcessed):
         """Check trigger and queue transcription."""
         if not all([self.stateManager, self.realTimeProcessor, self.config]): return
         check = self.stateManager.isOutputEnabled() and \
@@ -963,7 +919,7 @@ class SpeechToTextOrchestrator:
                 except Exception as e:
                     logError(f"Queue put error: {e}", exc_info=True)
 
-    def _run_loopSleep(self):
+    def _runLoopSleep(self):
         """Sleep briefly."""
         time.sleep(0.01)
 
@@ -975,7 +931,7 @@ class SpeechToTextOrchestrator:
         logInfo("Starting main orchestrator loop...")
         initialSetupOk = False
         try:
-            self._run_initialSetup()
+            self._runInitialSetup()
             if not self.stateManager.shouldProgramContinue():
                 logError("Setup failed.")
             else:
@@ -983,11 +939,11 @@ class SpeechToTextOrchestrator:
             if initialSetupOk:
                 logInfo("Entering main processing loop...")
                 while self.stateManager.shouldProgramContinue():
-                    if not self._run_checkTimeoutsNGlobalState(): break
-                    self._run_manageAudioStreamLifecycle()
-                    processed = self._run_processAudioChunks()
-                    self._run_queueTranscriptionRequest(processed)
-                    self._run_loopSleep()
+                    if not self._runCheckTimeoutsAndGlobalState(): break
+                    self._runManageAudioStreamLifecycle()
+                    processed = self._runProcessAudioChunks()
+                    self._runQueueTranscriptionRequest(processed)
+                    self._runLoopSleep()
         except KeyboardInterrupt:
             logInfo("\nKeyboardInterrupt. Stopping...")
         except Exception as e:

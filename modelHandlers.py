@@ -1,5 +1,4 @@
 # modelHandlers.py
-
 # ==============================================================================
 # ASR Model Handlers (Abstract Base Class and Implementations)
 # ==============================================================================
@@ -14,13 +13,12 @@
 #   `wslNemoServer.py` running in WSL via HTTP requests. It sends audio data
 #   and receives transcriptions, managing server interaction state.
 # ==============================================================================
-
 import abc  # Abstract Base Classes
 import gc
 import json
+import logging  # Needed for checking log level
 import time
 import traceback  # For detailed error logging
-import logging  # Needed for checking log level
 
 import numpy as np
 import requests  # For client-server communication
@@ -43,7 +41,6 @@ try:
 except ImportError:
     huggingface_hub = None
     hfHubAvailable = False
-
 # Import logging helpers from utils
 from utils import logWarning, logDebug, logInfo, logError
 
@@ -84,11 +81,9 @@ class AbstractAsrModelHandler(abc.ABC):
     def transcribeAudioSegment(self, audioData: np.ndarray, sampleRate: int) -> str | None:
         """
         Transcribes a given audio data segment.
-
         Args:
             audioData (numpy.ndarray): The audio segment (float32 expected).
             sampleRate (int): Sample rate of the audio data.
-
         Returns:
             str | None: The transcribed text, or None if transcription failed critically.
                         Returns an empty string "" if transcription succeeded but yielded no text (e.g., silence).
@@ -138,7 +133,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             # Optionally raise an error to halt initialization
             # raise ImportError("Missing required libraries for WhisperModelHandler")
             return  # Stop further initialization
-
         self.asrPipeline = None
         self.device = None
         self._determineDevice()
@@ -198,25 +192,20 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         if self.modelLoaded:
             logDebug(f"Whisper model '{self.config.get('modelName')}' is already loaded.")
             return True  # Already loaded
-
         # Ensure dependencies are available (checked in __init__, but double-check)
         if not transformersAvailable or not torch or pipeline is None or AutoConfig is None:
             logError("Cannot load Whisper model: Missing required libraries (transformers/torch).")
             return False
-
         modelName = self.config.get('modelName')
         if not modelName:
             logError("Cannot load Whisper model: 'modelName' not specified in config.")
             return False
-
         if self.device is None:
             logError("Cannot load Whisper model: Compute device not determined.")
             return False
-
         logInfo(f"Loading local Whisper model '{modelName}' to device '{self.device}'...")
         self._monitorMemory()  # Memory before load
         self._cudaClean()  # Clean before loading
-
         # Prepare generation arguments for the pipeline
         language = self.config.get('language')  # Can be None for auto-detect
         genKwargs = {"language": language} if language else {}  # Only add if specified
@@ -224,12 +213,10 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         # genKwargs["task"] = self.config.get('whisperTask', 'transcribe')
         genKwargs["return_timestamps"] = self.config.get('whisperReturnTimestamps', False)
         logDebug(f"Pipeline generate_kwargs: {genKwargs}")
-
         # Determine appropriate torch_dtype
-        use_fp16 = self.device.type == 'cuda'  # Use float16 only on CUDA
-        dtype = torch.float16 if use_fp16 else torch.float32
+        useFp16 = self.device.type == 'cuda'  # Use float16 only on CUDA
+        dtype = torch.float16 if useFp16 else torch.float32
         logDebug(f"Using torch_dtype: {dtype}")
-
         startTime = time.time()
         try:
             # Use trust_remote_code=True if the specific Whisper model requires it (newer or custom versions might)
@@ -238,7 +225,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                                               True)  # Default to True for newer models, make configurable
             if trustRemoteCode:
                 logWarning("trust_remote_code=True is enabled for loading the model.")
-
             # Create the pipeline
             self.asrPipeline = pipeline(
                 task="automatic-speech-recognition",
@@ -253,7 +239,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             logInfo(
                 f"Whisper model '{modelName}' loaded successfully locally on {self.device} in {loadTime:.2f}s.")
             self._warmUpModel()  # Warm up the model after successful load
-
         except Exception as e:
             logError(f"Failed loading local Whisper model '{modelName}': {e}")
             logError(traceback.format_exc())  # Log full traceback
@@ -269,7 +254,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             self.modelLoaded = False
             self.asrPipeline = None
             self._cudaClean()  # Clean up potential partial load artifacts
-
         self._monitorMemory()  # Memory after load attempt
         return self.modelLoaded
 
@@ -298,10 +282,9 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         if not self.modelLoaded:
             logDebug("Whisper model already unloaded.")
             return True  # Consider already unloaded as success
-
         modelName = self.config.get('modelName')
         logInfo(f"Unloading local Whisper model '{modelName}' from {self.device}...")
-        unload_success = False
+        unloadSuccess = False
         try:
             if self.asrPipeline is not None:
                 # Explicitly delete components to help garbage collection
@@ -314,17 +297,16 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             self.modelLoaded = False
             self._cudaClean()  # Clean memory *after* deleting references
             logInfo(f"Whisper model '{modelName}' unloaded successfully.")
-            unload_success = True
+            unloadSuccess = True
         except Exception as e:
             logError(f"Error during Whisper model unload: {e}", exc_info=True)
             # Ensure state reflects reality even if cleanup had issues
             self.modelLoaded = False
             self.asrPipeline = None
-            unload_success = False  # Indicate potential issue
+            unloadSuccess = False  # Indicate potential issue
         finally:
             self._monitorMemory()  # Check memory after unload attempt
-
-        return unload_success
+        return unloadSuccess
 
     def transcribeAudioSegment(self, audioData: np.ndarray, sampleRate: int) -> str | None:
         """Transcribes audio using the loaded local Whisper pipeline."""
@@ -336,7 +318,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             logDebug("Whisper transcription skipped: No audio data provided.")
             # Return empty string for empty input
             return ""
-
         # --- Pre-processing ---
         # Ensure float32 - RealTimeAudioProcessor should handle this, but double-check
         if audioData.dtype != np.float32:
@@ -345,11 +326,11 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             try:
                 # Attempt robust conversion (e.g., normalize ints)
                 if audioData.dtype.kind in ('i', 'u'):
-                    max_val = np.iinfo(audioData.dtype).max
-                    min_val = np.iinfo(audioData.dtype).min
-                    if max_val > min_val:
-                        audioData = (audioData.astype(np.float32) - min_val) / (
-                                max_val - min_val) * 2.0 - 1.0
+                    maxVal = np.iinfo(audioData.dtype).max
+                    minVal = np.iinfo(audioData.dtype).min
+                    if maxVal > minVal:
+                        audioData = (audioData.astype(np.float32) - minVal) / (
+                                maxVal - minVal) * 2.0 - 1.0
                     else:
                         audioData = audioData.astype(np.float32)
                 else:
@@ -357,7 +338,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             except Exception as e:
                 logError(f"Failed to convert audio data to float32: {e}")
                 return None  # Cannot proceed without correct dtype
-
         # Check sample rate - Whisper models are typically trained on 16kHz.
         # The Transformers pipeline *should* handle resampling automatically.
         targetSampleRate = 16000
@@ -365,7 +345,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
             logWarning(
                 f"Input audio sample rate ({sampleRate}Hz) differs from Whisper's standard ({targetSampleRate}Hz). Transformers pipeline will attempt resampling.")
             # If automatic resampling fails, manual resampling using librosa would be needed here.
-
         transcription = ""
         try:
             segmentDurationSec = len(audioData) / sampleRate if sampleRate > 0 else 0
@@ -373,19 +352,15 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                 f"Starting local Whisper transcription for {segmentDurationSec:.2f}s audio segment...")
             self._monitorMemory()  # Optional: Check memory before inference
             startTime = time.time()
-
             # Prepare input dictionary for the pipeline
             asrInput = {"raw": audioData, "sampling_rate": sampleRate}
-
             # --- Perform Transcription ---
             # Use torch.no_grad() for inference if not done internally by pipeline
             with torch.no_grad():
                 result = self.asrPipeline(asrInput)
-
             inferenceTime = time.time() - startTime
             logInfo(f"Local Whisper transcription finished in {inferenceTime:.3f}s.")
             # logDebug(f"Whisper Raw Result: {result}") # Can be very verbose
-
             # Extract text - structure might vary slightly based on args (e.g., with timestamps)
             if isinstance(result, dict) and "text" in result:
                 transcription = result["text"]  # Keep potential leading/trailing spaces for now
@@ -395,11 +370,9 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                 logWarning(
                     f"Unexpected Whisper result structure: {type(result)}. Could not extract text.")
                 transcription = ""  # Default to empty string
-
             # Basic cleanup - further filtering happens in TranscriptionOutputHandler
             transcription = transcription.strip() if transcription else ""
             logDebug(f"Whisper transcription result (stripped): '{transcription[:150]}...'")
-
         except Exception as e:
             logError(f"Error during local Whisper transcription: {e}")
             logError(traceback.format_exc())
@@ -410,7 +383,6 @@ class WhisperModelHandler(AbstractAsrModelHandler):
                 self._cudaClean()
         finally:
             self._monitorMemory()  # Optional: Check memory after inference
-
         return transcription  # Return string (even empty) or None on critical error
 
     def getDevice(self) -> str:
@@ -426,9 +398,9 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         try:
             logInfo("Fetching list of available ASR models from Hugging Face Hub...")
             # Filter specifically for Whisper models if desired, or general ASR
-            # model_filter = huggingface_hub.ModelFilter(task="automatic-speech-recognition", library="transformers", model_name="whisper")
-            model_filter = huggingface_hub.ModelFilter(task="automatic-speech-recognition")
-            models = huggingface_hub.list_models(filter=model_filter, sort="downloads",
+            # modelFilter = huggingface_hub.ModelFilter(task="automatic-speech-recognition", library="transformers", model_name="whisper")
+            modelFilter = huggingface_hub.ModelFilter(task="automatic-speech-recognition")
+            models = huggingface_hub.list_models(filter=modelFilter, sort="downloads",
                                                  direction=-1, limit=100)  # Limit results
             modelIds = [model.id for model in models if
                         'whisper' in model.id.lower()]  # Extra filter by name
@@ -566,10 +538,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         """
         Checks the status of the remote server's model. Throttles checks unless forced.
         Updates self.modelLoaded and self.serverReachable based on the response.
-
         Args:
             forceCheck (bool): If True, bypasses throttling and checks status immediately.
-
         Returns:
             bool: True if the server reports the model is 'loaded', False otherwise (or if status check fails).
         """
@@ -579,18 +549,15 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         if not forceCheck and (now - self.lastStatusCheckTime < throttleSeconds):
             logDebug("Skipping status check due to throttling.")
             return self.modelLoaded  # Return last known status
-
         self.lastStatusCheckTime = now
         logDebug("Checking remote server model status...")
         statusResponse = self._makeServerRequest('get', '/status')
-
         if statusResponse:
             serverStatus = statusResponse.get('status')
             modelName = statusResponse.get('modelName', 'N/A')
             device = statusResponse.get('device', 'N/A')
             logInfo(
                 f"Server Status: Status='{serverStatus}', Model='{modelName}', Device='{device}'")
-
             if serverStatus == 'loaded':
                 self.modelLoaded = True
                 return True
@@ -612,11 +579,9 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         if self.checkServerStatus(forceCheck=True):
             logInfo("Remote NeMo model is already loaded on server.")
             return True  # Already loaded
-
         # If not loaded or status check failed, attempt to trigger load
         logInfo("Model not loaded or status unknown, sending load request to remote server...")
         loadResponse = self._makeServerRequest('post', '/load')
-
         if loadResponse and loadResponse.get('status') == 'loaded':
             modelName = loadResponse.get('modelName', 'N/A')
             logInfo(f"Remote server confirmed successful model load: '{modelName}'.")
@@ -640,13 +605,10 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
     def unloadModel(self) -> bool:
         """Attempts to tell the remote server to unload the model."""
         logInfo("Requesting remote NeMo model unload...")
-
         # Check status first? Optional, unload is usually safe to send even if already unloaded.
         # if not self.modelLoaded:
         #     logInfo("Client believes model is already unloaded, sending unload request anyway.")
-
         unloadResponse = self._makeServerRequest('post', '/unload')
-
         if unloadResponse and unloadResponse.get('status') == 'unloaded':
             logInfo("Remote server confirmed successful model unload.")
             self.modelLoaded = False
@@ -692,13 +654,11 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         if audioData is None or len(audioData) == 0:
             logDebug("Remote transcription skipped: No audio data provided.")
             return ""  # Return empty string for empty input
-
         # --- Get Language from Config ---
         targetLang = self.config.get('language', 'en')  # Default to 'en' if not specified
         if not targetLang:
             logWarning("Target language is empty in config, defaulting to 'en' for NeMo request.")
             targetLang = 'en'
-
         # --- Prepare Audio Data ---
         # Ensure audioData is float32 bytes for sending
         if audioData.dtype != np.float32:
@@ -707,8 +667,8 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
             try:
                 # Perform robust conversion (handle int types)
                 if audioData.dtype.kind in ('i', 'u'):
-                    maxValue = np.iinfo(audioData.dtype).max  # camelCase
-                    minValue = np.iinfo(audioData.dtype).min  # camelCase
+                    maxValue = np.iinfo(audioData.dtype).max  # Use camelCase
+                    minValue = np.iinfo(audioData.dtype).min  # Use camelCase
                     if maxValue > minValue:
                         audioData = (audioData.astype(np.float32) - minValue) / (
                                 maxValue - minValue) * 2.0 - 1.0
@@ -723,24 +683,20 @@ class RemoteNemoClientHandler(AbstractAsrModelHandler):
         if not audioBytes:
             logWarning("Audio data became empty after converting to bytes.")
             return ""
-
         segmentDurationSec = len(audioData) / sampleRate if sampleRate > 0 else 0
         logInfo(
             f"Sending {segmentDurationSec:.2f}s audio segment ({len(audioBytes)} bytes, Lang: {targetLang}) to remote NeMo server...")
-
         # --- Prepare Request ---
         # Server expects multipart/form-data with 'audio_data' file
         # and query parameters 'sample_rate' and 'target_lang'
         files = {'audio_data': ('audio_segment.raw', audioBytes, 'application/octet-stream')}
         params = {'sample_rate': sampleRate, 'target_lang': targetLang}  # Add target_lang here
         startTime = time.time()
-
         # --- Make Request ---
         transcribeResponse = self._makeServerRequest('post', '/transcribe', params=params,
                                                      files=files)
         requestTime = time.time() - startTime
         logInfo(f"Remote transcription request finished in {requestTime:.3f}s.")
-
         # --- Process Response ---
         if transcribeResponse and 'transcription' in transcribeResponse:
             # Server successfully returned a transcription

@@ -1,6 +1,8 @@
 # tasks.py
+import re  # Need for regex replacement
 import string
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +28,6 @@ class TranscriptionOutputHandler:
         self.systemInteractionHandler = systemInteractionHandler
 
     # No _logDebug needed here, use imported logDebug directly
-
     def _calculateSegmentLoudness(self, audioData):
         """Calculates the average absolute amplitude of the entire segment."""
         if audioData is None or len(audioData) == 0:
@@ -35,17 +36,16 @@ class TranscriptionOutputHandler:
         if audioData.dtype.kind != 'f':
             # Basic normalization assuming int16 range if integer
             if audioData.dtype.kind in ('i', 'u'):
-                max_val = np.iinfo(audioData.dtype).max
-                min_val = np.iinfo(audioData.dtype).min
+                maxVal = np.iinfo(audioData.dtype).max
+                minVal = np.iinfo(audioData.dtype).min
                 # Avoid division by zero for zero range types
-                if max_val > min_val:
-                    audioData = (audioData.astype(np.float32) - min_val) / (
-                            max_val - min_val) * 2.0 - 1.0
+                if maxVal > minVal:
+                    audioData = (audioData.astype(np.float32) - minVal) / (
+                            maxVal - minVal) * 2.0 - 1.0
                 else:
                     audioData = audioData.astype(np.float32)
             else:  # Just cast other types
                 audioData = audioData.astype(np.float32)
-
         return np.mean(np.abs(audioData))
 
     def processTranscriptionResult(self, transcription, audioData):
@@ -60,11 +60,9 @@ class TranscriptionOutputHandler:
         else:
             segmentLoudness = self._calculateSegmentLoudness(audioData)
             logDebug(f"Processing transcription. Segment Avg Loudness = {segmentLoudness:.6f}")
-
         # --- Initial Checks & Filtering ---
         shouldOutput, finalText = self._filterAndFormatTranscription(transcription, segmentLoudness,
                                                                      audioData)
-
         # --- Output Actions & State Update ---
         if shouldOutput:
             self._handleValidOutput(finalText)
@@ -80,13 +78,10 @@ class TranscriptionOutputHandler:
         """
         cleanedText = transcription.strip() if isinstance(transcription, str) else ""
         originalCleanedText = cleanedText  # Keep original for logging comparison if needed
-
         if not cleanedText or cleanedText == ".":
             logDebug("Transcription is effectively empty after initial strip.")
             return False, ""
-
         cleanedTextLower = cleanedText.lower()  # Used for checks
-
         # --- Silence/Low Content Filtering ---
         if segmentLoudness != -1:
             if self._shouldSkipTranscriptionDueToSilenceOrLowContent(segmentLoudness, audioData):
@@ -95,7 +90,6 @@ class TranscriptionOutputHandler:
                 return False, ""
         else:
             logDebug("Skipping silence/low content filtering due to missing audio data.")
-
         # --- False Positive Filtering (Loudness Dependent) ---
         if segmentLoudness != -1:
             if self._isFalsePositive(cleanedTextLower, segmentLoudness):
@@ -103,7 +97,6 @@ class TranscriptionOutputHandler:
                 return False, ""
         else:
             logDebug("Skipping false positive filtering due to missing audio data.")
-
         # --- Banned Word Filtering (Always Applied) ---
         bannedWords = self.config.get('bannedWords', [])
         if bannedWords:
@@ -116,26 +109,22 @@ class TranscriptionOutputHandler:
                 try:
                     # Simple case-insensitive replacement:
                     cleanedText = re.sub(re.escape(wordToBan), '', cleanedText, flags=re.IGNORECASE)
-                except Exception as re_err:
-                    logWarning(f"Regex error banning word '{wordToBan}': {re_err}")
-
+                except Exception as reErr:
+                    logWarning(f"Regex error banning word '{wordToBan}': {reErr}")
             # Clean up extra spaces potentially left by removal
             if len(cleanedText) < len(textBeforeBanning):  # Only cleanup if something was removed
                 logDebug(
                     f"Removed banned words. Before: '{textBeforeBanning}', After: '{cleanedText}'")
                 # Replace multiple spaces with a single space
                 cleanedText = ' '.join(cleanedText.split())
-
         # --- Final Formatting & Empty Check ---
         formattedText = cleanedText.strip()  # Strip again after potential removals/space cleanup
         if self.config.get('removeTrailingDots', True):
             formattedText = formattedText.rstrip('. ')
-
         if not formattedText:
             logDebug(
                 f"Text became empty after all filtering/formatting. Original: '{originalCleanedText}'")
             return False, ""
-
         logDebug(f"Final formatted text ready for output: '{formattedText}'")
         return True, formattedText
 
@@ -148,19 +137,16 @@ class TranscriptionOutputHandler:
         if audioData is None or len(audioData) == 0:
             logWarning("Silence check called without audio data, cannot perform check.")
             return False  # Don't skip if we can't check
-
         sampleRate = self.config.get('actualSampleRate')
         if not sampleRate or sampleRate <= 0:
             logWarning("Invalid sample rate for silence check.")
             return False  # Cannot perform check
-
         # Use get with defaults for robustness
         chunkSilenceThreshold = self.config.get('dictationMode_silenceLoudnessThreshold', 0.001)
         minLoudDuration = self.config.get('minLoudDurationForTranscription', 0.3)  # Reduced default
         silenceSkipThreshold = self.config.get('silenceSkip_threshold', 0.0002)
         checkLeadingSec = self.config.get('skipSilence_beforeNSecSilence', 0.3)  # Check first 0.3s
         checkTrailingSec = self.config.get('skipSilence_afterNSecSilence', 0.3)  # Check last 0.3s
-
         # --- 1. Minimum Loud Duration Check ---
         if minLoudDuration > 0:
             # Ensure audioData is float for comparison
@@ -168,23 +154,19 @@ class TranscriptionOutputHandler:
             loudSamplesMask = np.abs(audioData) >= chunkSilenceThreshold
             numLoudSamples = np.sum(loudSamplesMask)
             totalLoudDuration = numLoudSamples / sampleRate
-
             if totalLoudDuration < minLoudDuration:
                 logDebug(
                     f"Silence skip CONFIRMED: Total loud duration ({totalLoudDuration:.2f}s) < min ({minLoudDuration:.2f}s). (Avg Loudness: {segmentMeanLoudness:.6f})")
                 return True
             # else:
             #    logDebug(f"Passed min loud duration check ({totalLoudDuration:.2f}s >= {minLoudDuration:.2f}s).")
-
         # --- 2. Average Loudness Check ---
         if segmentMeanLoudness >= silenceSkipThreshold:
             # logDebug(f"Segment mean loudness ({segmentMeanLoudness:.6f}) >= skip threshold ({silenceSkipThreshold:.6f}). Not skipping.")
             return False  # DO NOT SKIP
-
         # --- 3. Low Average Loudness - Check Overrides ---
         logDebug(
             f"Segment passed min loud duration but mean loudness ({segmentMeanLoudness:.6f}) < skip threshold ({silenceSkipThreshold:.6f}). Checking overrides...")
-
         # Check Beginning
         if checkLeadingSec > 0:
             leadingSamples = min(int(checkLeadingSec * sampleRate),
@@ -198,7 +180,6 @@ class TranscriptionOutputHandler:
                     logDebug(
                         f"Silence skip OVERRIDDEN: Leading {checkLeadingSec:.2f}s loud enough ({leadingLoudness:.6f}).")
                     return False  # DO NOT SKIP
-
         # Check Trailing
         if checkTrailingSec > 0:
             trailingSamples = min(int(checkTrailingSec * sampleRate),
@@ -212,13 +193,12 @@ class TranscriptionOutputHandler:
                     logDebug(
                         f"Silence skip OVERRIDDEN: Trailing {checkTrailingSec:.2f}s loud enough ({trailingLoudness:.6f}).")
                     return False  # DO NOT SKIP
-
         # --- 4. Final Decision (Low Avg, No Overrides) ---
         logDebug(
             f"Silence skip CONFIRMED: Low avg loudness ({segmentMeanLoudness:.6f}) and no start/end overrides triggered.")
         return True  # SKIP
 
-    def _isFalsePositive(self, cleanedText_lower, segmentLoudness):
+    def _isFalsePositive(self, cleanedTextLower, segmentLoudness):
         """
         Checks if the transcription is a common false word detected in low loudness.
         Requires segmentLoudness.
@@ -226,12 +206,10 @@ class TranscriptionOutputHandler:
         commonFalseWords = self.config.get('commonFalseDetectedWords', [])
         if not commonFalseWords:
             return False
-
         # Normalize the lowercased text for comparison (remove punctuation, extra spaces)
         translator = str.maketrans('', '', string.punctuation)
-        checkText = cleanedText_lower.translate(translator).strip()
+        checkText = cleanedTextLower.translate(translator).strip()
         checkText = ' '.join(checkText.split())  # Collapse multiple spaces
-
         # Ensure words in the config list are also normalized (lower, no punctuation)
         commonFalseWords_normalized = set(
             ' '.join(w.lower().translate(translator).strip().split())
@@ -239,7 +217,6 @@ class TranscriptionOutputHandler:
         )
         # Remove potential empty strings resulted from normalization
         commonFalseWords_normalized.discard('')
-
         if checkText in commonFalseWords_normalized:
             loudnessThreshold = self.config.get('loudnessThresholdOf_commonFalseDetectedWords',
                                                 0.0008)
@@ -250,25 +227,23 @@ class TranscriptionOutputHandler:
             else:
                 logDebug(
                     f"'{checkText}' matches false positive BUT loudness ({segmentLoudness:.6f}) >= threshold. Not filtering.")
-
         return False
 
     def _handleValidOutput(self, finalText):
         """Handles actions for valid, filtered transcription text."""
         # Always log the valid output
         logInfo(f"Output: {finalText}")
-
         # Use system interaction handler for typing/clipboard based on OS/config
         # Check output state and modifier keys
         if self.stateManager.isOutputEnabled():
             # Check if CTRL is pressed (common 'copy' or 'pause typing' intention)
             if not self.systemInteractionHandler.isModifierKeyPressed("ctrl"):
-                self.systemInteractionHandler.typeText(finalText + " ")  # Add space after output
+                self.systemInteractionHandler.typeText(
+                    finalText)  # Pass text without trailing space here
             else:
                 logDebug("CTRL key pressed, skipping text output action.")
         # else: # Output is disabled state handled by isOutputEnabled check
         #    logDebug("Text output skipped: Output state is disabled.")
-
         # Reset the idle timer only when valid output is produced
         self.stateManager.updateLastValidTranscriptionTime()
 
@@ -291,7 +266,6 @@ class FileTranscriber:
     def __init__(self, config, asrModelHandler):
         """
         Initialize the file transcriber.
-
         Args:
              config (ConfigurationManager): Application configuration object.
              asrModelHandler (AbstractAsrModelHandler): The ASR model handler to use.
@@ -303,29 +277,25 @@ class FileTranscriber:
     def transcribeFile(self, audioFilePath, outputFilePath=None):
         """
         Transcribe an audio file and optionally save the transcription.
-
         Args:
             audioFilePath (str | Path): Path to the input audio file.
             outputFilePath (str | Path, optional): Path to save the transcription text file.
                                                    If None, prints to console. Defaults to None.
-
         Returns:
             str | None: Transcribed text, or None if transcription fails.
         """
         logDebug(f"Attempting to transcribe file: {audioFilePath}")
         transcription = None
         audioFilePath = Path(audioFilePath)
-
         handlerType = type(self.asrModelHandler).__name__
         logDebug(f"Using ASR Handler: {handlerType}")
-
         try:
             # --- Ensure Model is Ready ---
             if not self.asrModelHandler.isModelLoaded():
                 logInfo(
                     f"ASR model ({handlerType}) not ready for file transcription, attempting to load/prepare...")
-                load_success = self.asrModelHandler.loadModel()  # Trigger load/check
-                if not load_success:
+                loadSuccess = self.asrModelHandler.loadModel()  # Trigger load/check
+                if not loadSuccess:
                     # loadModel method should log errors
                     logError(f"Model ({handlerType}) failed to load. File transcription aborted.")
                     return None
@@ -334,12 +304,10 @@ class FileTranscriber:
                 logError(
                     f"Model ({handlerType}) still not loaded after load attempt. File transcription aborted.")
                 return None
-
             # --- Read Audio File ---
             if not audioFilePath.is_file():
                 logError(f"Audio file not found at {audioFilePath}")
                 return None  # Return None on file not found
-
             try:
                 # Use soundfile for robust reading
                 audioData, sampleRate = sf.read(audioFilePath, dtype='float32', always_2d=False)
@@ -348,11 +316,9 @@ class FileTranscriber:
                 logError(
                     "Hint: Ensure the file is a valid audio format (WAV, FLAC, OGG, etc.) and not corrupted.")
                 return None
-
             fileDuration = len(audioData) / sampleRate if sampleRate > 0 else 0
             logInfo(
                 f"Audio file read successfully: {audioFilePath.name} (Sample Rate: {sampleRate}Hz, Duration: {fileDuration:.2f}s)")
-
             # --- Perform Transcription ---
             logInfo("Starting transcription...")
             startTime = time.time()
@@ -360,13 +326,11 @@ class FileTranscriber:
             transcription = self.asrModelHandler.transcribeAudioSegment(audioData, sampleRate)
             elapsedTime = time.time() - startTime
             logInfo(f"Transcription finished in {elapsedTime:.2f} seconds.")
-
             # --- Post-Processing & Output ---
             if transcription is not None and isinstance(transcription, str):
                 finalText = transcription.strip()
                 if self.config.get('removeTrailingDots', True):
                     finalText = finalText.rstrip('. ')
-
                 if finalText:  # Check if not empty after stripping
                     self._handleOutput(finalText, outputFilePath)
                     return finalText  # Return the final processed text
@@ -377,7 +341,6 @@ class FileTranscriber:
                 # Handler should log transcription errors
                 logWarning("Transcription failed or returned unexpected type from handler.")
                 return None  # Indicate failure
-
         except FileNotFoundError as e:
             # This is redundant as we check is_file earlier, but keep for safety
             logError(str(e))
