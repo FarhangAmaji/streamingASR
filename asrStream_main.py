@@ -895,8 +895,6 @@ class TranscriptionOutputHandler:
         lowerCleanedText = cleanedText.lower()
 
         if self._shouldSkipTranscriptionDueToSilence(segmentLoudness, audioData):
-            self._logDebug(
-                f"Post-ASR check indicates segment should have been skipped due to silence. Discarding result: '{cleanedText}'")
             return False, ""  # Do not output if determined to be silence.
 
         if self._isFalsePositive(lowerCleanedText, segmentLoudness):
@@ -917,44 +915,55 @@ class TranscriptionOutputHandler:
 
     def _shouldSkipTranscriptionDueToSilence(self, segmentMeanLoudness, audioData):
         """
-        Checks if the transcription should be ignored based on refined silence rules.
-        This acts as a double-check in case ASR was run on a segment that qualifies as silent.
+        Checks if the transcription should be ignored based on refined silence rules,
+        considering both leading and trailing audio loudness if the overall segment is quiet.
+        Returns True if the segment SHOULD be skipped, False otherwise.
         """
         silenceSkipThreshold = self.config.get('silenceSkip_threshold', 0.0002)
+        chunkSilenceThreshold = self.config.get('dictationMode_silenceLoudnessThreshold',
+                                                0.001)  # Reuse chunk threshold
+        sampleRate = self.config.get('actualSampleRate')
 
         if segmentMeanLoudness < silenceSkipThreshold:
+            self._logDebug(
+                f"Segment mean loudness ({segmentMeanLoudness:.6f}) below skip threshold ({silenceSkipThreshold:.6f}). Checking potential overrides...")
+
+            checkLeadingSec = self.config.get('skipSilence_beforeNSecSilence',
+                                              0.0)  # Get new config value
+            if checkLeadingSec > 0:
+                leadingSamples = int(checkLeadingSec * sampleRate)
+                if len(audioData) > 0:  # Ensure not processing empty array
+                    leadingAudio = audioData[:leadingSamples]
+                    leadingLoudness = np.mean(np.abs(leadingAudio))
+
+                    if leadingLoudness >= chunkSilenceThreshold:
+                        self._logDebug(
+                            f"Silence skip OVERRIDDEN: Segment mean loudness low, but "
+                            f"leading {checkLeadingSec:.2f}s loudness ({leadingLoudness:.6f}) >= "
+                            f"chunk threshold ({chunkSilenceThreshold:.6f}).")
+                        return False  # DO NOT SKIP
+
             checkTrailingSec = self.config.get('skipSilence_afterNSecSilence', 0.3)
             if checkTrailingSec > 0:
-                sampleRate = self.config.get('actualSampleRate')
                 trailingSamples = int(checkTrailingSec * sampleRate)
-
                 if len(audioData) >= trailingSamples:
                     trailingAudio = audioData[-trailingSamples:]
                     trailingLoudness = np.mean(np.abs(trailingAudio))
-                    chunkSilenceThreshold = self.config.get(
-                        'dictationMode_silenceLoudnessThreshold', 0.001)
 
                     if trailingLoudness >= chunkSilenceThreshold:
                         self._logDebug(
-                            f"Silence skip OVERRIDDEN: segmentMean ({segmentMeanLoudness:.6f}) < threshold "
-                            f"but trailing {checkTrailingSec}s loudness ({trailingLoudness:.6f}) >= chunk threshold.")
-                        return False  # Don't skip
-                    else:
-                        self._logDebug(
-                            f"Silence skip CONFIRMED: segmentMean ({segmentMeanLoudness:.6f}) < threshold "
-                            f"AND trailing {checkTrailingSec}s loudness ({trailingLoudness:.6f}) < chunk threshold.")
-                        return True  # Skip
-                else:
-                    self._logDebug(
-                        f"Silence skip CONFIRMED: segmentMean ({segmentMeanLoudness:.6f}) < threshold. "
-                        f"(Segment shorter than {checkTrailingSec}s).")
-                    return True  # Skip
-            else:
-                self._logDebug(
-                    f"Silence skip CONFIRMED: segmentMean ({segmentMeanLoudness:.6f}) < threshold. (Trailing check disabled).")
-                return True  # Skip
+                            f"Silence skip OVERRIDDEN: Segment mean loudness low, but "
+                            f"trailing {checkTrailingSec:.2f}s loudness ({trailingLoudness:.6f}) >= "
+                            f"chunk threshold ({chunkSilenceThreshold:.6f}).")
+                        return False  # DO NOT SKIP
+
+            self._logDebug(
+                f"Silence skip CONFIRMED: Segment mean loudness low and no loudness overrides triggered "
+                f"(leading check: {checkLeadingSec:.2f}s, trailing check: {checkTrailingSec:.2f}s).")
+            return True  # SKIP the segment
+
         else:
-            return False  # Don't skip
+            return False  # DO NOT SKIP
 
     def _isFalsePositive(self, lowerCleanedText, segmentLoudness):
         """
@@ -970,8 +979,6 @@ class TranscriptionOutputHandler:
         translator = str.maketrans('', '', string.punctuation)
         checkText = lowerCleanedText.translate(translator).strip()
         checkText = ' '.join(checkText.split())
-        self._logDebug(
-            f"Checking false positive for cleaned text: '{checkText}' (from original lower: '{lowerCleanedText}')")
 
         normalizedFalseWords = [w.lower() for w in commonFalseWords]
 
@@ -1604,7 +1611,8 @@ if __name__ == "__main__":
         "constantIntervalMode_transcriptionInterval": 4.0,  # Seconds between attempts
 
         "silenceSkip_threshold": 0.0002,  # Overall segment loudness to potentially skip
-        "skipSilence_afterNSecSilence": 0.3,  # Check trailing N sec loudness (0 to disable)
+        "skipSilence_beforeNSecSilence": 0.3,
+        "skipSilence_afterNSecSilence": 0.3,
         "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen'],
         "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
 
