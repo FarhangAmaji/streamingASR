@@ -143,6 +143,14 @@ userSettings = {
     "recordingToggleKey": "windows+alt+l",  # Key combination to toggle microphone recording on/off.
     "outputToggleKey": "ctrl+q",  # Key combination to toggle text output (typing/clipboard) on/off.
 
+    # --- Text Output Style (Windows Native PyAutoGUI only) ---
+    # How text is outputted when 'outputEnabled' is True and using PyAutoGUI.
+    # "letter": Types letter by letter with a small delay (default).
+    # "word": Types word by word with a pause between words.
+    # "whole": Types the entire text block as quickly as possible.
+    # Ignored if using clipboard output (WSL).
+    "typingMode": "whole",  # Options: "letter", "word", "whole"
+
     # --- Timeouts ---
     # Configure automatic stop conditions. Set to 0 to disable a specific timeout.
 

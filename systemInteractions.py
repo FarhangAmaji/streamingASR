@@ -5,7 +5,6 @@ import shutil  # For finding clip.exe
 import subprocess
 import time
 import traceback
-import logging # Needed for checking log level
 
 import keyboard
 
@@ -52,7 +51,8 @@ class SystemInteractionHandler:
             self.isMixerInitialized = True
             logInfo("Pygame mixer initialized for audio notifications.")
         except ImportError:
-            logWarning("Pygame library not found (`pip install pygame`). Audio notifications disabled.")
+            logWarning(
+                "Pygame library not found (`pip install pygame`). Audio notifications disabled.")
             self.isMixerInitialized = False
         except pygame.error as e:
             logWarning(f"Failed to initialize pygame mixer: {e}. Audio notifications disabled.")
@@ -131,7 +131,8 @@ class SystemInteractionHandler:
                     self.textOutputMethod = "pyautogui"
                     logInfo("Text Output Method: PyAutoGUI (Windows Native Typing)")
                 else:
-                    logWarning(f"PyAutoGUI is unavailable or failed to initialize ({self._pyautoguiErrorMessage}). Text output disabled.")
+                    logWarning(
+                        f"PyAutoGUI is unavailable or failed to initialize ({self._pyautoguiErrorMessage}). Text output disabled.")
                     self.textOutputMethod = "none"
             elif self.isWslEnvironment:
                 self.clipExePath = shutil.which('clip.exe')
@@ -141,8 +142,9 @@ class SystemInteractionHandler:
                 else:
                     logWarning("Text output disabled in WSL: 'clip.exe' not found in PATH.")
                     self.textOutputMethod = "none"
-            else: # Other Linux, macOS, etc.
-                logInfo(f"Simulated text output (typing/clipboard) is not configured for this OS ({osName}).")
+            else:  # Other Linux, macOS, etc.
+                logInfo(
+                    f"Simulated text output (typing/clipboard) is not configured for this OS ({osName}).")
                 self.textOutputMethod = "none"
         else:
             logInfo("Text output globally disabled by configuration ('enableTypingOutput': False).")
@@ -154,7 +156,8 @@ class SystemInteractionHandler:
             # logDebug(f"Skipping sound '{soundName}' - notifications disabled.") # Keep commented if too noisy
             return
 
-        if soundName in ['recordingOn', 'outputEnabled'] and not self.config.get('playEnableSounds', False):
+        if soundName in ['recordingOn', 'outputEnabled'] and not self.config.get('playEnableSounds',
+                                                                                 False):
             # logDebug(f"Skipping enable sound '{soundName}'.") # Keep commented if too noisy
             return
 
@@ -184,9 +187,10 @@ class SystemInteractionHandler:
         outputToggleKey = self.config.get('outputToggleKey')
 
         if not recordingToggleKey or not outputToggleKey:
-             logError("Hotkeys not configured ('recordingToggleKey' or 'outputToggleKey'). Keyboard monitor thread stopping.")
-             orchestrator.stateManager.stopProgram()
-             return
+            logError(
+                "Hotkeys not configured ('recordingToggleKey' or 'outputToggleKey'). Keyboard monitor thread stopping.")
+            orchestrator.stateManager.stopProgram()
+            return
 
         try:
             # Test if keyboard library can be accessed (might raise permission error)
@@ -199,7 +203,8 @@ class SystemInteractionHandler:
                     if keyboard.is_pressed(recordingToggleKey):
                         logDebug(f"Hotkey '{recordingToggleKey}' pressed.")
                         orchestrator.toggleRecording()
-                        self._waitForKeyRelease(recordingToggleKey) # Wait for release to avoid rapid toggling
+                        self._waitForKeyRelease(
+                            recordingToggleKey)  # Wait for release to avoid rapid toggling
 
                     if keyboard.is_pressed(outputToggleKey):
                         logDebug(f"Hotkey '{outputToggleKey}' pressed.")
@@ -211,14 +216,15 @@ class SystemInteractionHandler:
 
                 except Exception as keyCheckError:
                     # Log errors occurring during the check phase
-                    logError(f"Error checking key press: {keyCheckError}. Hotkeys may stop working.")
+                    logError(
+                        f"Error checking key press: {keyCheckError}. Hotkeys may stop working.")
                     # Avoid spamming logs if error repeats quickly
                     time.sleep(1)
 
         except ImportError:
             logError("Keyboard library not installed (`pip install keyboard`). Hotkeys disabled.")
             exitReason = "ImportError"
-            orchestrator.stateManager.stopProgram() # Signal main loop to stop
+            orchestrator.stateManager.stopProgram()  # Signal main loop to stop
         except Exception as e:
             # Catch permission errors or others during initial test or loop setup
             logError(f"Unhandled exception in keyboard monitoring setup/loop: {e}")
@@ -226,11 +232,10 @@ class SystemInteractionHandler:
             logError("Hint: If on Windows, try running as Administrator.")
             logError(traceback.format_exc())
             exitReason = f"Unhandled Exception: {e}"
-            orchestrator.stateManager.stopProgram() # Signal main loop to stop
+            orchestrator.stateManager.stopProgram()  # Signal main loop to stop
         finally:
-             # Log thread exit regardless of reason
-             logInfo("Keyboard shortcut monitor thread stopping.")
-
+            # Log thread exit regardless of reason
+            logInfo("Keyboard shortcut monitor thread stopping.")
 
     def _waitForKeyRelease(self, key):
         """Waits until the specified key is released to prevent rapid toggling."""
@@ -241,13 +246,12 @@ class SystemInteractionHandler:
             while keyboard.is_pressed(key):
                 if time.time() - startTime > timeout:
                     logDebug(f"Timeout waiting for key release '{key}'.")
-                    break # Avoid getting stuck indefinitely
+                    break  # Avoid getting stuck indefinitely
                 time.sleep(0.05)
             logDebug(f"Hotkey '{key}' released.")
         except Exception as e:
             # keyboard library might raise errors here too
             logWarning(f"Error checking key release for '{key}': {e}")
-
 
     def isModifierKeyPressed(self, key):
         """Checks if a specific modifier key (e.g., 'ctrl', 'alt', 'shift') is pressed."""
@@ -261,52 +265,105 @@ class SystemInteractionHandler:
         """
         Outputs text using the method determined during initialization
         (PyAutoGUI typing on Windows native, clipboard copy on WSL).
+        Supports different typing modes ('letter', 'word', 'whole') for PyAutoGUI.
         Assumes the check for outputEnabled happened before calling this.
         """
-        if not text: # Don't try to output empty text
-             return
+        if not text:  # Don't try to output empty text
+            logDebug("typeText called with empty string, skipping output.")
+            return
+
+        # Add a trailing space for better separation between outputs
+        textToOutput = text + " "
 
         if self.textOutputMethod == "pyautogui":
             if self._pyautoguiAvailable:
+                # Get typing mode from config, default to 'letter'
+                typingMode = self.config.get('typingMode', 'letter')
+                logDebug(f"Executing PyAutoGUI output with mode: '{typingMode}'")
                 try:
-                    import pyautogui # Import should be safe here
-                    pyautogui.write(text, interval=0.01) # Small interval can help reliability
-                    logDebug(f"Typed text via PyAutoGUI: '{text[:50]}...'")
+                    # PyAutoGUI needs to be imported here if not already globally
+                    import pyautogui  # Ensure it's imported within the method context
+
+                    if typingMode == "letter":
+                        # Original behavior: letter by letter with small interval
+                        pyautogui.write(textToOutput, interval=0.01)
+                        logDebug(f"Typed letter-by-letter: '{text[:50]}...'")
+
+                    elif typingMode == "word":
+                        # Word by word: split, type word, type space, pause
+                        wordInterval = 0.0  # Type words fast
+                        spaceInterval = 0.0  # Type space fast
+                        pauseBetweenWords = 0.05  # Seconds to pause between words
+                        words = textToOutput.split()  # Split by whitespace
+                        for i, word in enumerate(words):
+                            if not self.stateManager.isOutputEnabled() or self.systemInteractionHandler.isModifierKeyPressed(
+                                    "ctrl"):
+                                logDebug(
+                                    "Output disabled or CTRL pressed during word-by-word typing, stopping.")
+                                break  # Allow interruption
+                            pyautogui.write(word, interval=wordInterval)
+                            # Add space after each word except the last one (already included in textToOutput conceptually)
+                            # We split textToOutput which includes the final space, so always add space after write(word)
+                            pyautogui.write(' ', interval=spaceInterval)
+                            time.sleep(pauseBetweenWords)  # Pause after typing word and space
+                        logDebug(f"Typed word-by-word: '{text[:50]}...'")
+
+                    elif typingMode == "whole":
+                        # Type the whole string as fast as possible
+                        pyautogui.write(textToOutput, interval=0)
+                        logDebug(f"Typed whole text: '{text[:50]}...'")
+
+                    else:
+                        logWarning(f"Unknown typingMode '{typingMode}'. Defaulting to 'letter'.")
+                        pyautogui.write(textToOutput, interval=0.01)
+
+                except ImportError:
+                    logError("PyAutoGUI cannot be imported inside typeText. Typing disabled.")
+                    self._pyautoguiAvailable = False  # Mark as unavailable
                 except Exception as e:
-                    logWarning(f"PyAutoGUI write failed during execution: {e}")
-                    # Consider disabling it for future calls if needed
+                    logWarning(f"PyAutoGUI write failed during execution (mode: {typingMode}): {e}")
+                    # Optional: Consider disabling it temporarily if it fails repeatedly
                     # self._pyautoguiAvailable = False
             # else: # Logged during init, no need to repeat here unless debugging
             #     logDebug("Typing skipped: PyAutoGUI method selected but unavailable/failed init.")
 
         elif self.textOutputMethod == "clipboard":
+            # Clipboard method inherently outputs the "whole" text at once.
+            # Typing mode configuration is ignored.
             if self.clipExePath:
+                logDebug(f"Executing clipboard output (typingMode ignored). Text: '{text[:50]}...'")
                 try:
                     # Use subprocess.run for simplicity
                     process = subprocess.run(
                         [self.clipExePath],
-                        input=text,
-                        encoding='utf-8', # Specify encoding
-                        check=True,      # Raise exception on non-zero exit code
-                        capture_output=True # Capture stdout/stderr
+                        input=textToOutput,  # Use text with trailing space
+                        encoding='utf-8',  # Specify encoding
+                        check=True,  # Raise exception on non-zero exit code
+                        capture_output=True  # Capture stdout/stderr
                     )
                     logDebug(f"Copied text to Windows clipboard: '{text[:50]}...'")
                 except FileNotFoundError:
-                    logError(f"Error copying to clipboard: '{self.clipExePath}' not found. Disabling clipboard output.")
-                    self.clipExePath = None # Mark unavailable
+                    logError(
+                        f"Error copying to clipboard: '{self.clipExePath}' not found. Disabling clipboard output.")
+                    self.clipExePath = None  # Mark unavailable
                     self.textOutputMethod = "none"
                 except subprocess.CalledProcessError as e:
                     logError(f"Error running clip.exe (return code {e.returncode}): {e}")
-                    stderr_output = e.stderr.decode('utf-8', errors='ignore').strip()
-                    if stderr_output:
-                         logError(f"clip.exe stderr: {stderr_output}")
+                    # Attempt to decode stderr for more info
+                    stderr_output = "N/A"
+                    if e.stderr:
+                        try:
+                            stderr_output = e.stderr.decode('utf-8', errors='ignore').strip()
+                        except Exception:
+                            stderr_output = "(Could not decode stderr)"
+                    logError(f"clip.exe stderr: {stderr_output}")
                 except Exception as e:
                     logError(f"Unexpected error copying text to clipboard: {e}")
             # else: # Logged during init or if FileNotFoundError occurs
             #     logDebug("Clipboard copy skipped: Method selected but clip.exe unavailable.")
 
         # else: # textOutputMethod == "none"
-             # logDebug("Text output skipped: Method is 'none'.") # Can be noisy
+        # logDebug("Text output skipped: Method is 'none'.") # Can be noisy if logged every time
 
     def cleanup(self):
         """Cleans up system interaction resources (pygame mixer)."""
