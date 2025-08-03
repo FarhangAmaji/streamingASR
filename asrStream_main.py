@@ -278,7 +278,7 @@ class SpeechToTextTranscriber:
                 self.lastTranscriptionTime = currentTime
 
     def handleTranscriptionOutput(self, transcription, loudnessSum):
-        """Process transcription output with false detection handling"""
+        """Process transcription output with false detection handling and Ctrl key management."""
         # Remove trailing dots if the option is enabled
         cleanedText = transcription.rstrip('.') if self.removeTrailingDots else transcription
         cleanedText = cleanedText.strip().lower()  # Normalize for comparison
@@ -318,11 +318,11 @@ class SpeechToTextTranscriber:
             if self.outputEnabled:
                 # Restore original case and formatting for output
                 outputText = transcription.rstrip('.') if self.removeTrailingDots else transcription
+                outputText = outputText + " "
 
                 ctrl_was_pressed = keyboard.is_pressed('ctrl')  # Check if Ctrl is pressed
-
                 if not ctrl_was_pressed:
-                    pyautogui.write(outputText.strip() + " ")  # Perform the write
+                    pyautogui.write(outputText)
 
             # Reset consecutive empty transcription count
             self.emptyTranscriptionCount = 0
@@ -393,7 +393,7 @@ if __name__ == "__main__":
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
             transcriptionInterval=1,  # Longer interval between transcriptions
-            commonFalseDetectedWords=["you", "thank you", "bye"],
+            commonFalseDetectedWords=["you", "thank you", "bye", "amen"],
             loudnessThresholdOf_commonFalseDetectedWords=20,
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
