@@ -16,7 +16,7 @@ class SpeechToTextTranscriber:
     def __init__(self,
                  modelName="openai/whisper-large-v3",
                  transcriptionInterval=3,
-                 maxDuration_recording=460,
+                 maxDuration_recording=10000,
                  maxDuration_programActive=60 * 60,
                  model_unloadTimeout=5 * 60,
                  consecutiveIdleTime=100,
@@ -27,6 +27,8 @@ class SpeechToTextTranscriber:
                  channels=1,
                  removeTrailingDots=True,
                  language="en",
+                 commonFalseDetectedWords=None,  # New parameter
+                 loudnessThresholdOf_commonFalseDetectedWords=2.4,
                  ):
 
         # Audio recording parameters
@@ -41,6 +43,10 @@ class SpeechToTextTranscriber:
         self.modelName = modelName
         self.removeTrailingDots = removeTrailingDots
         self.language = language
+
+        # parameters for false word detection handling
+        self.commonFalseDetectedWords = commonFalseDetectedWords if commonFalseDetectedWords else []
+        self.loudnessThresholdOf_commonFalseDetectedWords = loudnessThresholdOf_commonFalseDetectedWords
 
         # Queue to store audio chunks
         self.audioQueue = queue.Queue()
@@ -243,7 +249,7 @@ class SpeechToTextTranscriber:
                     # Update activity timestamp
                     self.lastActivityTime = currentTime
 
-                    # Calculate and print the sum of loudness (sum of absolute values)
+                    # Calculate and store the loudness sum
                     loudnessSum = np.sum(np.abs(self.audioBuffer))
                     print(f"Sum of loudness for audio buffer: {loudnessSum}")
 
@@ -251,12 +257,9 @@ class SpeechToTextTranscriber:
                     reducedNoiseAudio = nr.reduce_noise(
                         y=self.audioBuffer,
                         sr=self.actualSampleRate,
-                        stationary=False,  # Use non-stationary noise reduction
-                        prop_decrease=.8  # Adjust noise reduction strength (0 to 1)
+                        stationary=False,
+                        prop_decrease=0.8
                     )
-
-                    loudnessSum_reducedNoiseAudio = np.sum(np.abs(reducedNoiseAudio))
-                    print(f"Sum of loudness for reducedNoiseAudio: {loudnessSum_reducedNoiseAudio}")
 
                     # Transcription call using raw
                     transcription = self.asr({
@@ -265,7 +268,8 @@ class SpeechToTextTranscriber:
                     })["text"]
                     print("Transcription:", transcription)
 
-                    self.handleTranscriptionOutput(transcription)
+                    # Pass loudnessSum to handleTranscriptionOutput
+                    self.handleTranscriptionOutput(transcription, loudnessSum)
                 except Exception as e:
                     print(f"Error during transcription: {e}")
 
@@ -273,31 +277,33 @@ class SpeechToTextTranscriber:
                 self.audioBuffer = np.array([], dtype=np.float32)
                 self.lastTranscriptionTime = currentTime
 
-    def handleTranscriptionOutput(self, transcription):
-        """Process transcription output"""
-        # Filter out empty transcriptions or just periods
-        if transcription.strip() and transcription.strip() != ".":
-            # Write the text only if output is enabled
-            cleanedText = transcription.strip()
+    def handleTranscriptionOutput(self, transcription, loudnessSum):
+        """Process transcription output with false detection handling"""
+        # Remove trailing dots if the option is enabled
+        cleanedText = transcription.rstrip('.') if self.removeTrailingDots else transcription
+        cleanedText = cleanedText.strip().lower()  # Normalize for comparison
 
-            # Remove trailing dots if the option is enabled
-            if self.removeTrailingDots:
-                cleanedText = cleanedText.rstrip('.')
+        # Calculate the loudness threshold for this transcription interval
+        loudnessThreshold = self.loudnessThresholdOf_commonFalseDetectedWords * self.transcriptionInterval
 
-            if self.outputEnabled:
-                pyautogui.write(cleanedText + " ")
-            else:
-                print("Output is disabled. Text not typed.")
+        # Check if the transcription is empty or just periods
+        isEmpty = not cleanedText or cleanedText == "."
 
-            # Reset consecutive empty transcription count
-            self.emptyTranscriptionCount = 0
-        else:
+        # Check if the transcription is a common false detection with low loudness
+        isFalseDetection = (
+                cleanedText in [word.lower() for word in self.commonFalseDetectedWords]
+                and loudnessSum < loudnessThreshold
+        )
+
+        if isEmpty or isFalseDetection:
             # Increment empty transcription count
             self.emptyTranscriptionCount += 1
             maxEmptyTranscriptions = math.ceil(
                 self.consecutiveIdleTime / self.transcriptionInterval)
             print(
-                f"Empty transcription detected ({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})")
+                f"Empty transcription detected"
+                f"({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})"
+            )
 
             # Check if we've reached the maximum number of empty transcriptions
             if self.emptyTranscriptionCount >= maxEmptyTranscriptions:
@@ -306,6 +312,20 @@ class SpeechToTextTranscriber:
                 self.stopRecording()
                 self.recordingStartTime = 0
                 self.emptyTranscriptionCount = 0
+        else:
+            print("Transcription:", transcription)
+            # Valid transcription
+            if self.outputEnabled:
+                # Restore original case and formatting for output
+                outputText = transcription.rstrip('.') if self.removeTrailingDots else transcription
+
+                ctrl_was_pressed = keyboard.is_pressed('ctrl')  # Check if Ctrl is pressed
+
+                if not ctrl_was_pressed:
+                    pyautogui.write(outputText.strip() + " ")  # Perform the write
+
+            # Reset consecutive empty transcription count
+            self.emptyTranscriptionCount = 0
 
     def cleanupInactiveRecording(self):
         """Clean up when recording is inactive"""
@@ -373,7 +393,9 @@ if __name__ == "__main__":
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
             transcriptionInterval=1,  # Longer interval between transcriptions
-            maxDuration_recording=200,  # 200s max recording
+            commonFalseDetectedWords=["you", "thank you", "bye"],
+            loudnessThresholdOf_commonFalseDetectedWords=20,
+            maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=3600,  # 1 hour program active time
             model_unloadTimeout=5 * 60,  # Unload after 5 minutes
             consecutiveIdleTime=100,  # Stop after 20 seconds of silence
