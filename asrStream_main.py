@@ -1044,6 +1044,12 @@ class SystemInteractionHandler:
                 f"Skipping sound '{soundName}' because enableAudioNotifications is False.")
             return  # Exit early if all notifications are disabled
 
+        if soundName in ['recordingOn', 'outputEnabled'] and not self.config.get('playEnableSounds',
+                                                                                 False):
+            self._logDebug(
+                f"Skipping '{soundName}' because playEnableSounds is False.")
+            return
+
         if not self.isMixerInitialized or soundName not in self.audioFiles:
             self._logDebug(
                 f"Cannot play sound '{soundName}'. Mixer initialized: {self.isMixerInitialized}, Sound exists: {soundName in self.audioFiles}")
@@ -1541,18 +1547,6 @@ class SpeechToTextOrchestrator:
 
 
 if __name__ == "__main__":
-    availableModels = WhisperModelHandler.listAvailableModels()
-    if availableModels:
-        print("--- Available Hugging Face ASR Models (Example List) ---")
-        count = 0
-        for modelId in availableModels:
-            if 'whisper' in modelId or 'canary' in modelId or 'parakeet' in modelId:
-                print(f"- {modelId}")
-                count += 1
-                if count >= 15: break  # Limit printed models
-        if not availableModels:
-            print("(Could not retrieve model list)")
-        print("-------------------------------------------------------")
 
     userSettings = {
         "modelName": "openai/whisper-large-v3",
@@ -1567,11 +1561,12 @@ if __name__ == "__main__":
         "silenceSkip_threshold": 0.0002,  # Overall segment loudness to potentially skip
         "skipSilence_afterNSecSilence": 0.3,  # Check trailing N sec loudness (0 to disable)
         "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen'],
-        "loudnessThresholdOf_commonFalseDetectedWords": 0.0008,
+        "loudnessThresholdOf_commonFalseDetectedWords": 0.00025,
 
         "removeTrailingDots": True,
         "outputEnabled": False,  # Start with typing OFF
         "isRecordingActive": True,  # Start with recording ON
+        "enableAudioNotifications": True,
         "playEnableSounds": False,  # Disable sounds for 'recording on'/'output enabled'
 
         "recordingToggleKey": "win+alt+l",
