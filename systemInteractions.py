@@ -9,7 +9,7 @@ import traceback
 import keyboard
 
 # Import logging helpers from utils
-from utils import logWarning, logDebug, logInfo, logError, logCritical  # Added logCritical
+from utils import logWarning, logDebug, logInfo, logError, logCritical
 
 
 # Pygame and PyAutoGUI are imported conditionally later where needed
@@ -39,9 +39,9 @@ class SystemInteractionHandler:
         self._determineTextOutputMethod()
         # Attributes needed for interaction with orchestrator/state within methods
         self.stateManager = None  # To be set by orchestrator or passed to methods
-        self.systemInteractionHandler = None  # To be set by orchestrator or passed to methods
-
-    # No _logDebug needed here, use imported logDebug directly
+        # Attributes for hotkey cooldowns
+        self.lastForceTranscriptionTime = 0.0  # Timestamp for the force transcription hotkey
+        self.forceTranscriptionCooldown = 0.5  # Cooldown duration in seconds
 
     def _setupPygame(self):
         """Initializes pygame mixer."""
@@ -58,7 +58,6 @@ class SystemInteractionHandler:
             logWarning(f"Failed to initialize pygame mixer: {e}. Audio notifications disabled.")
             self.isMixerInitialized = False
         except Exception as e:
-            # Changed to logCritical as this is an unexpected error during a core setup
             logCritical(f"Unexpected error during pygame mixer setup: {e}", exc_info=True)
             self.isMixerInitialized = False
 
@@ -90,7 +89,8 @@ class SystemInteractionHandler:
             "outputDisabled": "outputDisabled.mp3",
             "outputEnabled": "outputEnabled.mp3",
             "recordingOff": "recordingOff.mp3",
-            "recordingOn": "recordingOn.mp3"
+            "recordingOn": "recordingOn.mp3",
+            "forceTranscribe": "forceTranscribe.mp3"  # Optional: new sound for this action
         }
         scriptDir = self.config.get('scriptDir')
         if not scriptDir:
@@ -103,7 +103,12 @@ class SystemInteractionHandler:
                 self.audioFiles[name] = str(path)
                 loadedCount += 1
             else:
-                logWarning(f"Notification sound file not found: {path}")
+                if name != "forceTranscribe":  # Don't warn for optional new sound if missing
+                    logWarning(f"Notification sound file not found: {path}")
+                else:
+                    logDebug(
+                        f"Optional notification sound file 'forceTranscribe.mp3' not found at {path}. This sound will not play.")
+
         if loadedCount > 0:
             logInfo(f"Loaded {loadedCount} audio notification files.")
         else:
@@ -147,25 +152,23 @@ class SystemInteractionHandler:
             logInfo("Text output globally disabled by configuration ('enableTypingOutput': False).")
             self.textOutputMethod = "none"
 
-    def playNotification(self, soundName, forcePlay=False):  # Added forcePlay parameter
+    def playNotification(self, soundName, forcePlay=False):
         """Plays a notification sound if available and enabled."""
         if not forcePlay and not self.config.get('enableAudioNotifications', True):
-            # logDebug(f"Skipping sound '{soundName}' - notifications disabled.") # Keep commented if too noisy
+            # logDebug(f"Skipping sound '{soundName}' - notifications disabled.")
             return
-        if not forcePlay and soundName in ['recordingOn', 'outputEnabled'] and not self.config.get(
-                'playEnableSounds', False):
-            # logDebug(f"Skipping enable sound '{soundName}'.") # Keep commented if too noisy
+        if not forcePlay and soundName in ['recordingOn', 'outputEnabled',
+                                           'forceTranscribe'] and not self.config.get(
+            'playEnableSounds', False):
+            # logDebug(f"Skipping enable sound '{soundName}'.")
             return
 
         if not self.isMixerInitialized or soundName not in self.audioFiles:
-            # logDebug(f"Cannot play sound '{soundName}'. Mixer: {self.isMixerInitialized}, Sound exists: {soundName in self.audioFiles}") # Keep commented if too noisy
+            # logDebug(f"Cannot play sound '{soundName}'. Mixer: {self.isMixerInitialized}, Sound exists: {soundName in self.audioFiles}")
             return
-        # Import should be safe here as we checked isMixerInitialized
-        import pygame
+        import pygame  # Import should be safe here as we checked isMixerInitialized
         soundPath = self.audioFiles[soundName]
         try:
-            # Consider loading sounds once instead of every time playNotification is called
-            # For simplicity, loading here is okay for infrequent notifications.
             sound = pygame.mixer.Sound(soundPath)
             sound.play()
             logDebug(f"Played notification sound: {soundName}")
@@ -178,73 +181,114 @@ class SystemInteractionHandler:
         Stops when orchestrator's state indicates program should stop.
         """
         logInfo("Starting keyboard shortcut monitor thread.")
-        # Set stateManager and systemInteractionHandler if needed by other methods called from here
-        self.stateManager = orchestrator.stateManager
-        self.systemInteractionHandler = self  # Reference self for modifier key checks if needed in typeText
+        self.stateManager = orchestrator.stateManager  # Set for use in typeText if needed for modifier checks
 
         recordingToggleKey = self.config.get('recordingToggleKey')
         outputToggleKey = self.config.get('outputToggleKey')
+        forceTranscriptionKeyConfig = self.config.get(
+            'forceTranscriptionKey')  # Get the configured string e.g., "ctrl+,"
+
+        # Parse the forceTranscriptionKeyConfig into modifier and main key if it's a combo
+        forceModifierKey = None
+        forceMainKey = None
+        if forceTranscriptionKeyConfig and isinstance(forceTranscriptionKeyConfig, str):
+            parts = forceTranscriptionKeyConfig.lower().split('+')
+            if len(parts) > 1:  # It's a combo like "ctrl+,"
+                forceModifierKey = parts[0].strip()
+                forceMainKey = parts[-1].strip()  # Get the last part as the main key
+                logDebug(
+                    f"Parsed force transcription hotkey: Modifier='{forceModifierKey}', MainKey='{forceMainKey}'")
+            else:  # Single key
+                forceMainKey = parts[0].strip()
+                logDebug(
+                    f"Parsed force transcription hotkey: MainKey='{forceMainKey}' (no modifier)")
+        else:
+            logWarning(
+                "Optional 'forceTranscriptionKey' not configured or invalid. This hotkey will be disabled.")
 
         if not recordingToggleKey or not outputToggleKey:
-            # This is a critical failure for the thread's purpose
             logCritical(
-                "Hotkeys not configured ('recordingToggleKey' or 'outputToggleKey'). Keyboard monitor thread stopping.")
+                "Core hotkeys not configured ('recordingToggleKey' or 'outputToggleKey'). Keyboard monitor thread stopping.")
             orchestrator.stateManager.stopProgram()
             return
 
         try:
-            # Test if keyboard library can be accessed (might raise permission error)
             _ = keyboard.is_pressed('shift')  # A simple test
             logInfo("Keyboard library access test successful.")
 
             while orchestrator.stateManager.shouldProgramContinue():
                 try:
-                    # Use keyboard.is_pressed which is generally less blocking than wait
-                    if keyboard.is_pressed(recordingToggleKey):
+                    currentTime = time.time()
+
+                    # Recording Toggle Hotkey
+                    if recordingToggleKey and keyboard.is_pressed(recordingToggleKey):
                         logDebug(f"Hotkey '{recordingToggleKey}' pressed.")
                         orchestrator.toggleRecording()
-                        self._waitForKeyRelease(
-                            recordingToggleKey)  # Wait for release to avoid rapid toggling
+                        self._waitForKeyRelease(recordingToggleKey)
 
-                    if keyboard.is_pressed(outputToggleKey):
+                    # Output Toggle Hotkey
+                    if outputToggleKey and keyboard.is_pressed(outputToggleKey):
                         logDebug(f"Hotkey '{outputToggleKey}' pressed.")
                         orchestrator.toggleOutput()
                         self._waitForKeyRelease(outputToggleKey)
 
-                    # Short sleep to prevent high CPU usage
-                    time.sleep(0.05)
+                    # Force Transcription Hotkey (if configured and parsed)
+                    if forceMainKey:  # Check if forceMainKey was successfully parsed
+                        mainKeyPressed = keyboard.is_pressed(forceMainKey)
+                        modifierPressed = keyboard.is_pressed(
+                            forceModifierKey) if forceModifierKey else True  # True if no modifier
+
+                        if mainKeyPressed and modifierPressed:
+                            logDebug(
+                                f"Hotkey '{forceTranscriptionKeyConfig}' (parsed: mod='{forceModifierKey}', key='{forceMainKey}') pressed.")
+                            if (
+                                    currentTime - self.lastForceTranscriptionTime) > self.forceTranscriptionCooldown:
+                                logInfo("Force transcription hotkey activated.")
+                                orchestrator.forceTranscribeCurrentBuffer()
+                                self.playNotification("forceTranscribe")
+                                self.lastForceTranscriptionTime = currentTime
+                            else:
+                                logDebug("Force transcription hotkey in cooldown.")
+                            # Wait for the main action key release
+                            self._waitForKeyRelease(forceMainKey)
+                            # Optionally, also wait for modifier release if it causes issues,
+                            # but usually waiting for the main key is sufficient.
+                            # if forceModifierKey: self._waitForKeyRelease(forceModifierKey)
+
+                    time.sleep(0.05)  # Short sleep to prevent high CPU usage
                 except Exception as keyCheckError:
-                    # Log errors occurring during the check phase
+                    # This will catch errors from keyboard.is_pressed if an invalid key name from config is used
+                    # (e.g., if other hotkeys were misconfigured)
                     logError(
                         f"Error checking key press: {keyCheckError}. Hotkeys may stop working.",
-                        exc_info=True)
-                    # Avoid spamming logs if error repeats quickly
-                    time.sleep(1)
+                        exc_info=True)  # Pass True to capture actual exception for logging
+                    time.sleep(1)  # Avoid spamming logs if error repeats quickly
 
         except ImportError:
-            # Changed to logCritical as this makes the thread (and thus hotkeys) unusable
             logCritical(
                 "Keyboard library not installed (`pip install keyboard`). Hotkeys disabled. Stopping program.",
                 exc_info=True)
-            orchestrator.stateManager.stopProgram()  # Signal main loop to stop
+            orchestrator.stateManager.stopProgram()
         except Exception as e:
-            # Catch permission errors or others during initial test or loop setup
-            # Changed to logCritical as this makes the thread (and thus hotkeys) unusable
             logCritical(f"Unhandled exception in keyboard monitoring setup/loop: {e}",
                         exc_info=True)
             logError("Hint: If on Linux, ensure user is in 'input' group or run with sudo.")
             logError("Hint: If on Windows, try running as Administrator.")
-            # traceback.format_exc() is already handled by exc_info=True with DynamicLogger
-            # logError(traceback.format_exc()) # This line can be removed if DynamicLogger handles it
-            orchestrator.stateManager.stopProgram()  # Signal main loop to stop
+            orchestrator.stateManager.stopProgram()
         finally:
-            # Log thread exit regardless of reason
             logInfo("Keyboard shortcut monitor thread stopping.")
 
     def _waitForKeyRelease(self, key):
-        """Waits until the specified key is released to prevent rapid toggling."""
+        """
+        Waits until the specified key is released to prevent rapid toggling.
+        The 'key' argument should be a single key name that keyboard.is_pressed() understands.
+        """
         startTime = time.time()
         timeout = 2.0  # seconds
+        # Ensure key is not None or empty before proceeding, though callers should ensure this.
+        if not key:
+            logWarning("_waitForKeyRelease called with empty key.")
+            return
         try:
             # Use a loop with a short sleep to check for release
             while keyboard.is_pressed(key):
@@ -254,7 +298,7 @@ class SystemInteractionHandler:
                 time.sleep(0.05)
             logDebug(f"Hotkey '{key}' released.")
         except Exception as e:
-            # keyboard library might raise errors here too
+            # keyboard library might raise errors here too if key is invalid
             logWarning(f"Error checking key release for '{key}': {e}")
 
     def isModifierKeyPressed(self, key):
@@ -294,6 +338,7 @@ class SystemInteractionHandler:
                         pauseBetweenWords = 0.05
                         words = textToOutput.split()
                         for i, word in enumerate(words):
+                            # Check stateManager here directly as it's set in monitorKeyboardShortcuts
                             if self.stateManager and not self.stateManager.isOutputEnabled() or self.isModifierKeyPressed(
                                     "ctrl"):
                                 logDebug(
@@ -337,17 +382,17 @@ class SystemInteractionHandler:
                     self.textOutputMethod = "none"
                 except subprocess.CalledProcessError as e:
                     logError(f"Error running clip.exe (return code {e.returncode}): {e}",
-                             exc_info=True)  # Added exc_info
+                             exc_info=True)
                     stderrOutput = "N/A"
                     if e.stderr:
                         try:
                             stderrOutput = e.stderr.decode('utf-8', errors='ignore').strip()
                         except Exception:
                             stderrOutput = "(Could not decode stderr)"
-                    logError(f"clip.exe stderr: {stderrOutput}")  # Keep this for specific stderr
+                    logError(f"clip.exe stderr: {stderrOutput}")
                 except Exception as e:
                     logError(f"Unexpected error copying text to clipboard: {e}",
-                             exc_info=True)  # Added exc_info
+                             exc_info=True)
             # else:
             #     logDebug("Clipboard copy skipped: Method selected but clip.exe unavailable.")
         # else:

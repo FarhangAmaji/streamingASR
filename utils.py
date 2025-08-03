@@ -2,6 +2,7 @@
 import \
     logging  # Still needed for logging constants (e.g., logging.DEBUG) and managing third-party loggers
 import sys
+import traceback
 from pathlib import Path
 from dynamicLogger import DynamicLogger  # Import DynamicLogger
 from define_logConfigSets import defaultLogConfigSets  # Import the configurations
@@ -42,19 +43,14 @@ def configure_dynamic_logging(logConfigSets=None, highOrderOptions=None,
         }
         for lib_name, level in libraries_to_silence.items():
             try:
-                # Get the standard Python logger for the library
                 lib_logger = logging.getLogger(lib_name)
-                # Set its level. This prevents it from propagating messages below this level.
                 lib_logger.setLevel(level)
-                # Crucially, ensure these loggers don't use DynamicLogger's handlers
-                # by clearing their handlers and setting propagate to False if they
-                # should *only* be silent and not log anywhere else.
-                # Or, if they should log to a basic console, ensure they have a handler.
-                # For now, just setting level is the primary goal.
-                # If they acquire handlers from root, DynamicLogger's `propagate=False` on its own
-                # underlying logger should prevent duplication if it's named differently than root.
-                # If DynamicLogger's underlying logger *is* the root or a parent, this needs care.
-                # DynamicLogger sets self.logger.propagate = False, which is good.
+                # Optional: If these libraries should *never* output through DynamicLogger's
+                # handlers (e.g. if DynamicLogger is root), clear their handlers
+                # and set propagate=False. For now, DynamicLogger's own propagate=False
+                # on its named logger should prevent duplication.
+                # lib_logger.handlers.clear()
+                # lib_logger.propagate = False
             except Exception as e_lib:
                 print(f"Warning: Could not set log level for library '{lib_name}': {e_lib}",
                       file=sys.stderr)
@@ -64,34 +60,44 @@ def configure_dynamic_logging(logConfigSets=None, highOrderOptions=None,
 
     except Exception as e:
         print(f"CRITICAL ERROR: Could not configure DynamicLogger: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)  # Print traceback for config error
 
         # Fallback logger
         class PrintLoggerFallback:
-            def _log(self, level, msg, exc_info=False, **_):
+            def _log(self, level, msg, exc_info=None, **_):  # Adjusted to accept exc_info
                 print(f"{level}: {msg}",
                       file=sys.stderr if level in ["ERROR", "CRITICAL"] else sys.stdout)
-                if exc_info:
-                    import traceback
-                    traceback.print_exc(file=sys.stderr)
+                if exc_info:  # If exc_info is True or a tuple
+                    current_exc_info = sys.exc_info()
+                    if not (current_exc_info[0] is None and current_exc_info[1] is None and
+                            current_exc_info[2] is None):
+                        traceback.print_exception(*current_exc_info, file=sys.stderr)
+                    elif isinstance(exc_info, tuple):  # If exc_info was passed as a tuple
+                        traceback.print_exception(*exc_info, file=sys.stderr)
 
-            def debug(self, msg, **kwargs): self._log("DEBUG", msg, **kwargs)
+            def debug(self, msg, **kwargs):
+                self._log("DEBUG", msg, **kwargs)
 
-            def info(self, msg, **kwargs): self._log("INFO", msg, **kwargs)
+            def info(self, msg, **kwargs):
+                self._log("INFO", msg, **kwargs)
 
-            def warning(self, msg, **kwargs): self._log("WARNING", msg, **kwargs)
+            def warning(self, msg, **kwargs):
+                self._log("WARNING", msg, **kwargs)
 
-            def error(self, msg, exc_info=False, **kwargs): self._log("ERROR", msg,
-                                                                      exc_info=exc_info, **kwargs)
+            def error(self, msg, exc_info=False,
+                      **kwargs):  # Default exc_info to False for fallback
+                self._log("ERROR", msg, exc_info=exc_info, **kwargs)
 
-            def critical(self, msg, exc_info=False, **kwargs): self._log("CRITICAL", msg,
-                                                                         exc_info=exc_info,
-                                                                         **kwargs)
+            def critical(self, msg, exc_info=False,
+                         **kwargs):  # Default exc_info to False for fallback
+                self._log("CRITICAL", msg, exc_info=exc_info, **kwargs)
 
         appDynamicLogger = PrintLoggerFallback()
-        appLogger = appDynamicLogger
+        appLogger = appDynamicLogger  # Also set appLogger to the fallback
         appDynamicLogger.critical(
             f"DynamicLogger initialization failed: {e}. Falling back to print-based logging.",
-            exc_info=True)
+            exc_info=True)  # Log the original error with traceback
 
 
 # --- Logging Helper Functions (using DynamicLogger) ---
@@ -118,35 +124,85 @@ def logWarning(message, **kwargs):
 
 
 def logError(message, exc_info=None, **kwargs):
-    # DynamicLogger's .error() method defaults exc_info to True.
-    # If exc_info is explicitly passed as False here, we honor that.
-    # Otherwise, let DynamicLogger's default (True for .error()) take effect.
+    """
+    Logs an error message.
+    If exc_info is True, current exception information is captured and logged.
+    If exc_info is an exception tuple (type, value, traceback), it's used.
+    If exc_info is False or None, no exception info is logged beyond the message.
+    DynamicLogger's .error() method defaults its internal excInfo to True.
+    """
+    final_exc_info_for_dynamic_logger = None
+    if exc_info:  # Covers True or an actual exception tuple
+        if isinstance(exc_info, bool):  # If it's specifically True
+            # Capture current exception. If no exception, sys.exc_info() is (None, None, None)
+            # DynamicLogger will handle this by not printing a traceback if it's all None.
+            final_exc_info_for_dynamic_logger = True  # Let DynamicLogger call sys.exc_info()
+        elif isinstance(exc_info, tuple) and len(exc_info) == 3:  # It's an explicit exception tuple
+            final_exc_info_for_dynamic_logger = exc_info
+        else:  # Unrecognized exc_info type, treat as no exception info for safety
+            final_exc_info_for_dynamic_logger = False
+    else:  # exc_info is False or None
+        final_exc_info_for_dynamic_logger = False
+
     if appDynamicLogger:
-        if exc_info is False:  # Explicitly False
+        # Pass the processed exc_info value to DynamicLogger's `excInfo` parameter
+        # DynamicLogger.error defaults its internal excInfo to True if not provided or None.
+        # We are being more explicit here.
+        if final_exc_info_for_dynamic_logger is True:  # Let DynamicLogger handle True
+            appDynamicLogger.error(message,
+                                   **kwargs)  # Relies on DynamicLogger's default excInfo=True for .error()
+        elif final_exc_info_for_dynamic_logger:  # It's a tuple
+            appDynamicLogger.error(message, excInfo=final_exc_info_for_dynamic_logger, **kwargs)
+        else:  # It's False or None (from processing)
             appDynamicLogger.error(message, excInfo=False, **kwargs)
-        else:  # None or True, rely on DynamicLogger's default or pass True if exc_info is a tuple
-            passed_exc_info = exc_info if exc_info is not None else True  # Let DynamicLogger handle True correctly
-            appDynamicLogger.error(message, excInfo=passed_exc_info, **kwargs)
-    else:
+
+    else:  # Logger not initialized fallback
         print(f"ERROR (logger_uninit): {message}", file=sys.stderr)
-        if exc_info:
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+        if final_exc_info_for_dynamic_logger:  # If True or a tuple
+            current_exc_info_tuple = sys.exc_info()
+            if not (current_exc_info_tuple[0] is None and current_exc_info_tuple[1] is None and
+                    current_exc_info_tuple[2] is None):
+                traceback.print_exception(*current_exc_info_tuple, file=sys.stderr)
+            elif isinstance(final_exc_info_for_dynamic_logger, tuple):
+                traceback.print_exception(*final_exc_info_for_dynamic_logger, file=sys.stderr)
 
 
 def logCritical(message, exc_info=None, **kwargs):
-    # DynamicLogger's .critical() method defaults exc_info to True.
+    """
+    Logs a critical message.
+    If exc_info is True, current exception information is captured and logged.
+    If exc_info is an exception tuple (type, value, traceback), it's used.
+    If exc_info is False or None, no exception info is logged beyond the message.
+    DynamicLogger's .critical() method defaults its internal excInfo to True.
+    """
+    final_exc_info_for_dynamic_logger = None
+    if exc_info:  # Covers True or an actual exception tuple
+        if isinstance(exc_info, bool):  # If it's specifically True
+            final_exc_info_for_dynamic_logger = True  # Let DynamicLogger call sys.exc_info()
+        elif isinstance(exc_info, tuple) and len(exc_info) == 3:  # It's an explicit exception tuple
+            final_exc_info_for_dynamic_logger = exc_info
+        else:  # Unrecognized exc_info type, treat as no exception info for safety
+            final_exc_info_for_dynamic_logger = False
+    else:  # exc_info is False or None
+        final_exc_info_for_dynamic_logger = False
+
     if appDynamicLogger:
-        if exc_info is False:  # Explicitly False
+        if final_exc_info_for_dynamic_logger is True:
+            appDynamicLogger.critical(message,
+                                      **kwargs)  # Relies on DynamicLogger's default excInfo=True for .critical()
+        elif final_exc_info_for_dynamic_logger:  # It's a tuple
+            appDynamicLogger.critical(message, excInfo=final_exc_info_for_dynamic_logger, **kwargs)
+        else:  # It's False or None
             appDynamicLogger.critical(message, excInfo=False, **kwargs)
-        else:  # None or True, rely on DynamicLogger's default or pass True if exc_info is a tuple
-            passed_exc_info = exc_info if exc_info is not None else True  # Let DynamicLogger handle True correctly
-            appDynamicLogger.critical(message, excInfo=passed_exc_info, **kwargs)
-    else:
+    else:  # Logger not initialized fallback
         print(f"CRITICAL (logger_uninit): {message}", file=sys.stderr)
-        if exc_info:
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+        if final_exc_info_for_dynamic_logger:  # If True or a tuple
+            current_exc_info_tuple = sys.exc_info()
+            if not (current_exc_info_tuple[0] is None and current_exc_info_tuple[1] is None and
+                    current_exc_info_tuple[2] is None):
+                traceback.print_exception(*current_exc_info_tuple, file=sys.stderr)
+            elif isinstance(final_exc_info_for_dynamic_logger, tuple):
+                traceback.print_exception(*final_exc_info_for_dynamic_logger, file=sys.stderr)
 
 
 def get_logger_for_level_check(loggerName="SpeechToTextApp"):
@@ -155,9 +211,6 @@ def get_logger_for_level_check(loggerName="SpeechToTextApp"):
     Used for isEnabledFor checks if needed, though DynamicLogger's
     filtering is comprehensive.
     """
-    # This will return a standard logger. It won't reflect DynamicLogger's complex conditional logic
-    # for whether a message will *actually* be output.
-    # It's generally better to let DynamicLogger decide if a message should be logged.
     return logging.getLogger(loggerName)
 
 
@@ -169,62 +222,66 @@ def convertWindowsPathToWsl(windowsPath) -> str | None:
     """
     try:
         windowsPathConverted = Path(windowsPath)
+        # Define logging functions based on appDynamicLogger availability
+        log_warning_func = logWarning if appDynamicLogger else lambda msg, **kwargs: print(
+            f"WARNING: {msg}", file=sys.stderr)
+        log_error_func = logError if appDynamicLogger else lambda msg, **kwargs: print(
+            f"ERROR: {msg}", file=sys.stderr)
+        # For debug, if logger not available, make it a no-op to avoid too much print spam
+        log_debug_func = logDebug if appDynamicLogger else lambda msg, **kwargs: None
+
         if not windowsPathConverted.is_absolute():
             resolvedPath = windowsPathConverted.resolve()
-            if appDynamicLogger:  # Check if logger is available
-                logWarning(
-                    f"Path '{windowsPathConverted}' is not absolute. Attempting resolution to '{resolvedPath}' for WSL conversion.")
-            else:
-                print(
-                    f"WARNING: Path '{windowsPathConverted}' is not absolute. Attempting resolution to '{resolvedPath}' for WSL conversion.",
-                    file=sys.stderr)
+            log_warning_func(
+                f"Path '{windowsPathConverted}' is not absolute. Attempting resolution to '{resolvedPath}' for WSL conversion.")
             windowsPathConverted = resolvedPath
             if not windowsPathConverted.is_absolute():
-                if appDynamicLogger:
-                    logError("Cannot convert relative path to WSL path after resolution attempt.")
-                else:
-                    print(
-                        "ERROR: Cannot convert relative path to WSL path after resolution attempt.",
-                        file=sys.stderr)
+                log_error_func("Cannot convert relative path to WSL path after resolution attempt.")
                 return None
+
         pathStr = str(windowsPathConverted)
-        if appDynamicLogger:
-            logDebug(f"Attempting WSL path conversion for: {pathStr}")
+        log_debug_func(f"Attempting WSL path conversion for: {pathStr}")
+
         # Handle standard drive paths (C:\, D:\ etc.)
         if len(pathStr) >= 2 and pathStr[1] == ':':
             driveLetter = pathStr[0].lower()
             restOfPath = pathStr[2:].replace('\\', '/')
-            # Standard WSL mount point is /mnt/<drive_letter>
             wslPath = f"/mnt/{driveLetter}{restOfPath}"
-            if appDynamicLogger:
-                logDebug(f"Converted Windows drive path to WSL path: '{wslPath}'")
+            log_debug_func(f"Converted Windows drive path to WSL path: '{wslPath}'")
             return wslPath
         # Handle basic UNC paths (\\server\share\...)
         elif pathStr.startswith('\\\\'):
-            if appDynamicLogger:
-                logWarning(
-                    "Attempting basic UNC path conversion for WSL - might not work depending on WSL mount configuration.")
-            else:
-                print(
-                    "WARNING: Attempting basic UNC path conversion for WSL - might not work depending on WSL mount configuration.",
-                    file=sys.stderr)
-            wslPath = pathStr.replace('\\', '/')
-            if appDynamicLogger:
-                logDebug(f"Converted Windows UNC path to potential WSL path: '{wslPath}'")
+            log_warning_func(
+                "Attempting basic UNC path conversion for WSL - might not work depending on WSL mount configuration.")
+            wslPath = pathStr.replace('\\', '/')  # Basic replacement
+            log_debug_func(f"Converted Windows UNC path to potential WSL path: '{wslPath}'")
             return wslPath
         else:
-            if appDynamicLogger:
-                logError(f"Unrecognized Windows path format for WSL conversion: {pathStr}")
-            else:
-                print(f"ERROR: Unrecognized Windows path format for WSL conversion: {pathStr}",
-                      file=sys.stderr)
-
+            log_error_func(f"Unrecognized Windows path format for WSL conversion: {pathStr}")
             return None
     except Exception as e:
+        # Define or redefine the error logging function for the except block
+        # This ensures it handles the parameters correctly if appDynamicLogger is not available.
         if appDynamicLogger:
-            logError(f"Error during Windows path conversion to WSL: {e}", exc_info=True)
+            current_log_error_func = logError
         else:
-            print(f"ERROR: Error during Windows path conversion to WSL: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+            def fallback_error_logger(msg, exc_info=None, **kwargs):
+                print(f"ERROR: {msg}", file=sys.stderr)
+                # If exc_info is True (passed from logError call), print current exception
+                # This lambda doesn't directly receive sys.exc_info(), so we rely on the caller
+                # of logError to have passed exc_info=True, which then logError (in utils)
+                # should handle by calling sys.exc_info() or letting DynamicLogger do it.
+                # For this direct fallback, if exc_info is True, we print the current traceback.
+                if exc_info is True:  # Check specifically for True
+                    import traceback
+                    traceback.print_exc(file=sys.stderr)
+                elif isinstance(exc_info, tuple):  # If it's an explicit tuple
+                    import traceback
+                    traceback.print_exception(*exc_info, file=sys.stderr)
+
+            current_log_error_func = fallback_error_logger
+
+        current_log_error_func(f"Error during Windows path conversion to WSL: {e}", exc_info=True)
+        # Note: If appDynamicLogger was None, the fallback_error_logger already printed the traceback
+        # if exc_info=True was passed. If appDynamicLogger was active, logError in utils.py handles exc_info.
         return None

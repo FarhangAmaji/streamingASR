@@ -46,7 +46,7 @@ userSettings = {
     # Choose the ASR model. Examples:
     # "modelName": "openai/whisper-tiny.en",
     # Local Whisper (requires Transformers, smaller for quick test)
-    # "modelName": "openai/whisper-large-v3",   # Local Whisper (requires Transformers)
+    #"modelName": "openai/whisper-large-v3",  # Local Whisper (requires Transformers)
     # "modelName": "openai/whisper-medium.en", # Local Whisper (English-only, smaller)
     "modelName": "nvidia/canary-180m-flash",  # Example: Remote NeMo (requires WSL server)
     # "modelName": "nvidia/parakeet-rnnt-1.1b", # Example: Remote NeMo (larger, requires WSL server)
@@ -82,7 +82,7 @@ userSettings = {
     # (dictationMode only) Seconds of silence after speech to trigger transcription.
     "dictationMode_silenceDurationToOutput": 0.6,
     # (dictationMode only) Audio loudness below which audio is considered 'silence'.
-    "dictationMode_silenceLoudnessThreshold": 0.00025,  # Adjust based on mic/noise.
+    "dictationMode_silenceLoudnessThreshold": 0.00035,  # Adjust based on mic/noise.
     # (constantIntervalMode only) Interval in seconds for transcription.
     "constantIntervalMode_transcriptionInterval": 4.0,
 
@@ -99,7 +99,7 @@ userSettings = {
     "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', 'thanks', 'okay', 'uh', 'um',
                                  'hmm'],
     # Loudness threshold for filtering 'commonFalseDetectedWords'.
-    "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
+    "loudnessThresholdOf_commonFalseDetectedWords": 0.00065,
     # Words/phrases always removed from transcription (case-insensitive).
     "bannedWords": ["<|endoftext|>"],
 
@@ -121,6 +121,8 @@ userSettings = {
     # Global key combinations. See keyboard library for syntax.
     "recordingToggleKey": "windows+alt+l",  # Toggle microphone recording.
     "outputToggleKey": "ctrl+q",  # Toggle text output.
+    "forceTranscriptionKey": "ctrl+.",
+    # New hotkey (Ctrl + Comma). The keyboard library expects ',' for the comma key.
 
     # --- Text Output Style (Windows Native PyAutoGUI only) ---
     # "letter": Types char by char. "word": Types word by word. "whole": Types entire block.
@@ -132,9 +134,9 @@ userSettings = {
     # Max duration (seconds) the entire application will run.
     "maxDurationProgramActive": 0,
     # Seconds of inactivity before automatically unloading the ASR model.
-    "model_unloadTimeout": 10 * 60,  # e.g., 10 minutes
+    "model_unloadTimeout": 60 * 60,  # e.g., 10 minutes
     # Seconds of consecutive silence (while recording) before auto-stopping recording.
-    "consecutiveIdleTime": 2 * 60,  # e.g., 2 minutes
+    "consecutiveIdleTime": 30 * 60,  # e.g., 2 minutes
 
     # --- Audio Settings ---
     # Sample rate in Hz (e.g., 16000 for Whisper/NeMo).
