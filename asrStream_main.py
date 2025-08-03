@@ -25,6 +25,7 @@ class BaseTranscriber:
                  modelName="openai/whisper-large-v3",
                  language="en",
                  removeTrailingDots=True,
+                 onlyCpu=False,
                  debugPrint=False):
         """
         Initialize the base transcriber with common parameters.
@@ -39,9 +40,13 @@ class BaseTranscriber:
         self.language = language
         self.removeTrailingDots = removeTrailingDots
         self.debugPrint = debugPrint
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.asr = None
         self.modelLoaded = False
+
+        if onlyCpu:
+            self.device = torch.device('cpu')  # Force CPU, ignore CUDA availability
+        else:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def _debugPrint(self, message):
         if self.debugPrint:
@@ -249,6 +254,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
                  channels=1,
                  removeTrailingDots=True,
                  playEnableSounds=True,
+                 onlyCpu=False,
                  debugPrint=False,
                  recordingToggleKey="win+alt+l",
                  outputToggleKey="ctrl+q"):
@@ -291,9 +297,9 @@ class SpeechToTextTranscriber(BaseTranscriber):
             recordingToggleKey (str): Key combination to toggle recording (e.g., "win+alt+l").
             outputToggleKey (str): Key combination to toggle text output (e.g., "ctrl+q").
         """
-        super().__init__(modelName=modelName,
-                         language=language,
+        super().__init__(modelName=modelName, language=language,
                          removeTrailingDots=removeTrailingDots,
+                         onlyCpu=onlyCpu,
                          debugPrint=debugPrint)
 
         self.transcriptionMode = transcriptionMode
@@ -763,6 +769,7 @@ if __name__ == "__main__":
         transcriber = SpeechToTextTranscriber(
             modelName="openai/whisper-large-v3",
             transcriptionMode="dictationMode",
+            onlyCpu=True,
             constantIntervalMode_transcriptionInterval=4,
             dictationMode_silenceDurationToOutput=.6,
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
