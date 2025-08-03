@@ -1,9 +1,9 @@
+import abc  # Abstract Base Classes
 import gc
 import os
 import queue
 import threading
 import time
-import abc  # Abstract Base Classes
 from pathlib import Path
 
 import huggingface_hub
@@ -1065,13 +1065,16 @@ class SpeechToTextOrchestrator:
         self._logDebug("Initializing SpeechToText Orchestrator...")
 
         self.stateManager = StateManager(self.config)
-        if "whisper" in self.config.get('modelName').lower() or \
-                "canary" in self.config.get('modelName').lower() or \
-                "parakeet" in self.config.get('modelName').lower():  # Basic check
+        model_name_lower = self.config.get('modelName', '').lower()
+        if "whisper" in model_name_lower or \
+                "canary" in model_name_lower or \
+                "parakeet" in model_name_lower:  # Add other patterns if needed
             self.asrModelHandler = WhisperModelHandler(self.config)
         else:
-            raise ValueError(f"Unsupported model type in name: {self.config.get('modelName')}. "
-                             "Refactoring needed to add new ASR Handlers.")
+            logWarning(f"Model name '{self.config.get('modelName')}' doesn't match known patterns "
+                       f"for WhisperModelHandler. Attempting to load with it anyway.")
+            self.asrModelHandler = WhisperModelHandler(self.config)
+
         self.systemInteractionHandler = SystemInteractionHandler(self.config)
         self.audioHandler = AudioHandler(self.config, self.stateManager)
         self.realTimeProcessor = RealTimeAudioProcessor(self.config, self.stateManager)
@@ -1087,9 +1090,12 @@ class SpeechToTextOrchestrator:
 
     def _printInitialInstructions(self):
         """Prints setup info and user instructions."""
+        device_str = str(self.config.get('device')) if self.config.get(
+            'device') else "CPU/GPU (Auto)"
+
         print(f"\n--- Configuration ---")
         print(f"Mode: {self.config.get('transcriptionMode')}")
-        print(f"ASR Model: {self.config.get('modelName')} on {self.config.get('device')}")
+        print(f"ASR Model: {self.config.get('modelName')} (Target Device: {device_str})")
         print(
             f"Audio Device: ID={self.config.get('deviceId') or 'Default'}, Rate={self.config.get('actualSampleRate')}Hz, Channels={self.config.get('actualChannels')}")
         print(f"--- Hotkeys ---")
@@ -1105,6 +1111,7 @@ class SpeechToTextOrchestrator:
     def _startBackgroundThreads(self):
         """Starts threads for hotkeys and model management."""
         self._logDebug("Starting background threads...")
+        self.threads = []  # Clear list in case run is called again (shouldn't happen ideally)
 
         keyboardThread = threading.Thread(
             target=self.systemInteractionHandler.monitorKeyboardShortcuts,
@@ -1126,106 +1133,123 @@ class SpeechToTextOrchestrator:
         self._logDebug(f"Started {len(self.threads)} background threads.")
 
     def toggleRecording(self):
-        """Toggles the recording state."""
+        """Toggles the recording state. Called by SystemInteractionHandler."""
         if self.stateManager.isRecording():
             if self.stateManager.stopRecording():  # If state actually changed
                 self.systemInteractionHandler.playNotification("recordingOff")
                 logInfo("Recording stopped via hotkey.")
                 self.realTimeProcessor.clearBuffer()
-                self.audioHandler.clearQueue()  # Also clear queue
+                self.audioHandler.clearQueue()
         else:
             if self.stateManager.startRecording():  # If state actually changed
                 self.systemInteractionHandler.playNotification("recordingOn")
                 logInfo("Recording started via hotkey.")
 
     def toggleOutput(self):
-        """Toggles the text output state."""
+        """Toggles the text output state. Called by SystemInteractionHandler."""
         newState = self.stateManager.toggleOutput()
         notification = "outputEnabled" if newState else "outputDisabled"
         self.systemInteractionHandler.playNotification(notification)
 
     def run(self):
-        """Main execution loop."""
+        """Main execution loop orchestrating the real-time transcription process."""
         logInfo("Starting main orchestrator loop...")
         try:
-            if self.stateManager.isRecording():  # Load immediately if starting in recording state
+            if self.stateManager.isRecording() and not self.asrModelHandler.isModelLoaded():
                 logInfo("Initial state is recording: ensuring model is loaded...")
                 self.asrModelHandler.loadModel()
                 if not self.asrModelHandler.isModelLoaded():
-                    logError("CRITICAL: Initial model load failed. Exiting.")
-                    self.stateManager.stopProgram()
-                    return  # Exit if essential initial load fails
+                    logError(
+                        "CRITICAL: Initial model load failed. Recording disabled. Please check logs.")
+                    self.stateManager.stopRecording()
 
             self._startBackgroundThreads()
 
-            streamStarted = False
+            initial_stream_started = False
             if self.stateManager.isRecording():
-                streamStarted = self.audioHandler.startStream()
-                if not streamStarted:
-                    logError("CRITICAL: Failed to start audio stream initially. Exiting.")
-                    self.stateManager.stopProgram()
-                    return
+                logInfo("Initial state is recording: attempting to start audio stream...")
+                initial_stream_started = self.audioHandler.startStream()
+                if not initial_stream_started:
+                    logError(
+                        "CRITICAL: Failed to start audio stream initially. Recording disabled.")
+                    self.stateManager.stopRecording()  # Disable recording if stream fails
 
             logInfo("Orchestrator ready. Waiting for input or hotkeys...")
 
             while self.stateManager.shouldProgramContinue():
-                if self.stateManager.checkProgramTimeout(): break
-                if self.stateManager.checkRecordingTimeout():
-                    logInfo("Recording timeout reached, stopping recording...")
-                    self.toggleRecording()  # Use toggle logic to handle state and cleanup
-                if self.stateManager.checkIdleTimeout():
-                    logInfo("Idle timeout reached, stopping recording...")
-                    self.toggleRecording()  # Use toggle logic
 
-                is_stream_active = self.audioHandler.stream is not None and self.audioHandler.stream.active
-                if self.stateManager.isRecording() and not is_stream_active:
+                if self.stateManager.checkProgramTimeout():
+                    logInfo("Maximum program duration reached.")
+                    break  # Exit the main loop cleanly
+                if self.stateManager.isRecording():  # Only check recording-related timeouts if recording
+                    if self.stateManager.checkRecordingTimeout():
+                        logInfo("Recording session timeout reached, stopping recording...")
+                        self.toggleRecording()  # Use toggle logic to handle state and cleanup
+                    elif self.stateManager.checkIdleTimeout():
+                        logInfo("Idle timeout reached, stopping recording...")
+                        self.toggleRecording()  # Use toggle logic
+
+                should_stream_be_active = self.stateManager.isRecording()
+                is_stream_actually_active = self.audioHandler.stream is not None and self.audioHandler.stream.active
+
+                if should_stream_be_active and not is_stream_actually_active:
+                    self._logDebug("Attempting to start audio stream (recording active)...")
                     if not self.audioHandler.startStream():
-                        logError("Failed to restart audio stream. Recording disabled.")
-                        self.stateManager.stopRecording()  # Force stop if stream fails
-                        continue  # Skip rest of loop iteration
+                        logError("Failed to start/restart audio stream. Disabling recording.")
+                        self.stateManager.stopRecording()  # Force stop recording if stream fails
+                        time.sleep(1)
+                        continue  # Skip the rest of this loop iteration
 
-                elif not self.stateManager.isRecording() and is_stream_active:
+                elif not should_stream_be_active and is_stream_actually_active:
+                    self._logDebug("Stopping audio stream (recording inactive)...")
                     self.audioHandler.stopStream()
-                    self.realTimeProcessor.clearBuffer()  # Clear buffer when stream stops
-                    self.audioHandler.clearQueue()  # Clear queue when stream stops
+                    self.realTimeProcessor.clearBuffer()
+                    self.audioHandler.clearQueue()
 
-                if self.stateManager.isRecording() and self.audioHandler.streamActive():
+                audio_processed_this_loop = False
+                if self.stateManager.isRecording() and is_stream_actually_active:
                     while True:
                         chunk = self.audioHandler.getAudioChunk()
-                        if chunk is None: break  # Queue is empty
-                        self.realTimeProcessor.processIncomingChunk(chunk)
+                        if chunk is None:
+                            break  # Audio queue is empty
+                        if self.realTimeProcessor.processIncomingChunk(chunk):
+                            audio_processed_this_loop = True  # Mark that we did work
 
-                    audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
+                    if audio_processed_this_loop:
+                        audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
 
-                    if audioDataToTranscribe is not None and self.asrModelHandler.isModelLoaded():
-                        self._logDebug("Trigger received, proceeding to transcription.")
-                        transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
-                            audioDataToTranscribe,
-                            self.config.get('actualSampleRate')
-                        )
+                        if audioDataToTranscribe is not None:
+                            if self.asrModelHandler.isModelLoaded():
+                                self._logDebug(
+                                    f"Transcription triggered with {len(audioDataToTranscribe)} samples. Proceeding to ASR.")
+                                transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
+                                    audioDataToTranscribe,
+                                    self.config.get('actualSampleRate')
+                                )
+                                self.outputHandler.processTranscriptionResult(
+                                    transcriptionResult,
+                                    audioDataToTranscribe  # Pass audio data for loudness checks
+                                )
+                            else:
+                                logWarning(
+                                    "Transcription triggered, but ASR model is not loaded. Skipping.")
+                                if self.config.get('transcriptionMode') == 'dictationMode':
+                                    self.realTimeProcessor.clearBuffer()
+                                    self.realTimeProcessor.isCurrentlySpeaking = False
+                                    self.realTimeProcessor.silenceStartTime = None
+                                    self._logDebug(
+                                        "Reset dictation state after trigger despite model not being loaded.")
 
-                        self.outputHandler.processTranscriptionResult(
-                            transcriptionResult,
-                            audioDataToTranscribe  # Pass audio data for loudness checks
-                        )
-                    elif audioDataToTranscribe is not None and not self.asrModelHandler.isModelLoaded():
-                        logWarning(
-                            "Transcription triggered, but ASR model is not loaded. Skipping.")
-                        if self.config.get('transcriptionMode') == 'dictationMode':
-                            self.realTimeProcessor.clearBuffer()
-                            self.realTimeProcessor.isCurrentlySpeaking = False
-                            self.realTimeProcessor.silenceStartTime = None
-
-                time.sleep(0.01)  # Small sleep to yield CPU
+                time.sleep(0.01)  # ~10ms sleep yields CPU effectively
 
         except KeyboardInterrupt:
             logInfo("\nKeyboardInterrupt received. Stopping...")
             self.stateManager.stopProgram()
         except Exception as e:
-            logError(f"\n!!! UNEXPECTED ERROR in main loop: {e}")
+            logError(f"\n!!! UNEXPECTED ERROR in main orchestrator loop: {e}")
             import traceback
-            logError(traceback.format_exc())
-            self.stateManager.stopProgram()
+            logError(traceback.format_exc())  # Log detailed traceback
+            self.stateManager.stopProgram()  # Signal threads and loop to stop
         finally:
             self._cleanup()
 
@@ -1233,15 +1257,34 @@ class SpeechToTextOrchestrator:
         """Cleans up all resources."""
         logInfo("Initiating cleanup...")
         self.stateManager.stopProgram()
-        self.stateManager.stopRecording()  # Ensure recording state is off
+        self.stateManager.stopRecording()  # Ensure recording state is off for final check
 
-        self.audioHandler.stopStream()
+        logInfo("Stopping audio stream during cleanup...")
+        self.audioHandler.stopStream()  # Safe to call even if already stopped
 
-        time.sleep(0.5)
+        logInfo("Clearing buffers and queues during cleanup...")
+        self.realTimeProcessor.clearBuffer()
+        self.audioHandler.clearQueue()
 
+        logInfo("Waiting briefly for background threads to stop...")
+        time.sleep(0.5)  # Give threads a moment to react to stateManager.shouldProgramContinue()
+
+        logInfo("Cleaning up system interaction handler...")
         self.systemInteractionHandler.cleanup()  # Cleanup pygame etc.
 
-        logInfo("Program stopped.")
+        logInfo("Attempting to join background threads...")
+        join_timeout = 1.0  # seconds
+        for t in self.threads:
+            if t is not None and t.is_alive():
+                try:
+                    t.join(timeout=join_timeout)
+                    if t.is_alive():
+                        logWarning(f"Thread {t.name} did not terminate within {join_timeout}s.")
+                except Exception as e:
+                    logWarning(f"Error joining thread {t.name}: {e}")
+        self.threads = []  # Clear thread list
+
+        logInfo("Program cleanup complete.")
 
 
 if __name__ == "__main__":
@@ -1270,8 +1313,7 @@ if __name__ == "__main__":
 
         "silenceSkip_threshold": 0.0002,  # Overall segment loudness to potentially skip
         "skipSilence_afterNSecSilence": 0.3,  # Check trailing N sec loudness (0 to disable)
-        "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', "hallelujah", "thanks",
-                                     "okay", "hello"],
+        "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen'],
         "loudnessThresholdOf_commonFalseDetectedWords": 0.0008,
 
         "removeTrailingDots": True,
