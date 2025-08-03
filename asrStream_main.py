@@ -1314,6 +1314,7 @@ class SpeechToTextOrchestrator:
     """
     Main class orchestrating the real-time speech-to-text process.
     Connects and manages all components (Audio, State, Processing, Output, System, Model).
+    Handles transcription in a separate thread to maintain main thread responsiveness.
     """
 
     def __init__(self, **userConfig):
@@ -1347,10 +1348,9 @@ class SpeechToTextOrchestrator:
                     f"Cannot use model '{modelName}': NeMo toolkit not installed (required for 'nvidia/' prefix).")
                 logError("Attempting to load with whisperModelHandler - This is unlikely to work.")
                 self.asrModelHandler = WhisperModelHandler(self.config)
-
         elif "whisper" in modelNameLower or \
                 "canary" in modelNameLower or \
-                "parakeet" in modelNameLower:  # Add other HF patterns if needed
+                "parakeet" in modelNameLower:
             logInfo(f"Using whisperModelHandler for '{modelName}'.")
             self.asrModelHandler = WhisperModelHandler(self.config)
         else:
@@ -1368,6 +1368,8 @@ class SpeechToTextOrchestrator:
                                                            self.asrModelHandler,
                                                            self.systemInteractionHandler)
 
+        self.transcriptionRequestQueue = queue.Queue()
+
         self.threads = []  # To keep track of background threads
 
         self._printInitialInstructions()
@@ -1376,7 +1378,7 @@ class SpeechToTextOrchestrator:
         """Prints setup info and user instructions."""
         deviceStr = str(self.config.get('device')) if self.config.get(
             'device') else "CPU/GPU (Auto)"
-        handlerType = type(self.asrModelHandler).__name__  # Show which handler is chosen
+        handlerType = type(self.asrModelHandler).__name__
 
         print(f"\n--- Configuration ---")
         print(f"Mode: {self.config.get('transcriptionMode')}")
@@ -1394,14 +1396,62 @@ class SpeechToTextOrchestrator:
         print(f"Program Auto-Exit After: {self.config.get('maxDurationProgramActive')} s")
         print(f"------------------\n")
 
+    def _transcriptionWorkerLoop(self):
+        """
+        Worker loop running in a separate thread.
+        Waits for audio data on the queue, transcribes it, and handles output.
+        """
+        logInfo("Starting Transcription Worker thread.")
+        queueTimeoutSeconds = 1.0  # How long to wait for an item before checking program status
+
+        while self.stateManager.shouldProgramContinue():
+            try:
+                queueItem = self.transcriptionRequestQueue.get(timeout=queueTimeoutSeconds)
+
+                if queueItem is None:  # Use None as a potential sentinel, though timeout is primary exit now
+                    self._logDebug("Transcription worker received None sentinel, exiting.")
+                    break
+
+                audioDataToTranscribe, sampleRate = queueItem
+
+                if self.asrModelHandler.isModelLoaded():
+                    self._logDebug(
+                        f"Transcription worker processing {len(audioDataToTranscribe)} samples...")
+                    transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
+                        audioDataToTranscribe,
+                        sampleRate
+                    )
+                    self.outputHandler.processTranscriptionResult(
+                        transcriptionResult,
+                        audioDataToTranscribe  # Pass audio data for loudness checks etc.
+                    )
+                    self._logDebug("Transcription worker finished processing segment.")
+                else:
+                    logWarning("Transcription worker skipped segment: ASR model is not loaded.")
+                    if self.config.get('transcriptionMode') == 'dictationMode':
+                        self._logDebug(
+                            "Dictation mode state might need reset due to unloaded model during transcription request.")
+
+                self.transcriptionRequestQueue.task_done()  # Signal queue item processed
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logError(f"!!! ERROR in Transcription Worker thread: {e}")
+                import traceback
+                logError(traceback.format_exc())
+                time.sleep(1)
+
+        logInfo("Transcription Worker thread stopping.")
+
     def _startBackgroundThreads(self):
-        """Starts threads for hotkeys and model management."""
+        """Starts threads for hotkeys, model management, and transcription."""
         self._logDebug("Starting background threads...")
-        self.threads = []  # Clear list in case run is called again (shouldn't happen ideally)
+        self.threads = []  # Clear list
 
         keyboardThread = threading.Thread(
             target=self.systemInteractionHandler.monitorKeyboardShortcuts,
-            args=(self,),  # Pass reference to orchestrator
+            args=(self,),
             name="KeyboardMonitorThread",
             daemon=True
         )
@@ -1415,6 +1465,14 @@ class SpeechToTextOrchestrator:
         )
         self.threads.append(modelThread)
         modelThread.start()
+
+        transcriptionThread = threading.Thread(
+            target=self._transcriptionWorkerLoop,  # Target the new worker method
+            name="TranscriptionWorkerThread",
+            daemon=True  # Ensure it exits if main thread exits unexpectedly
+        )
+        self.threads.append(transcriptionThread)
+        transcriptionThread.start()
 
         self._logDebug(f"Started {len(self.threads)} background threads.")
 
@@ -1440,11 +1498,11 @@ class SpeechToTextOrchestrator:
     def _cleanup(self):
         """Cleans up all resources."""
         logInfo("Initiating cleanup...")
-        self.stateManager.stopProgram()
-        self.stateManager.stopRecording()  # Ensure recording state is off for final check
+        self.stateManager.stopProgram()  # Signal all loops to stop
+        self.stateManager.stopRecording()
 
         logInfo("Stopping audio stream during cleanup...")
-        self.audioHandler.stopStream()  # Safe to call even if already stopped
+        self.audioHandler.stopStream()
 
         logInfo("Clearing buffers and queues during cleanup...")
         self.realTimeProcessor.clearBuffer()
@@ -1458,10 +1516,10 @@ class SpeechToTextOrchestrator:
             self.asrModelHandler.cleanup()
 
         logInfo("Cleaning up system interaction handler...")
-        self.systemInteractionHandler.cleanup()  # Cleanup pygame etc.
+        self.systemInteractionHandler.cleanup()
 
         logInfo("Attempting to join background threads...")
-        joinTimeout = 1.0  # seconds
+        joinTimeout = 1.5  # Increased slightly to allow transcription thread potential work
         for t in self.threads:
             if t is not None and t.is_alive():
                 try:
@@ -1470,13 +1528,13 @@ class SpeechToTextOrchestrator:
                         logWarning(f"Thread {t.name} did not terminate within {joinTimeout}s.")
                 except Exception as e:
                     logWarning(f"Error joining thread {t.name}: {e}")
-        self.threads = []  # Clear thread list
+        self.threads = []
 
         logInfo("Program cleanup complete.")
 
     def _run_initialSetup(self):
         """Handle initial setup steps including model loading and thread start."""
-        if self.stateManager.isRecording() and not self.asrModelHandler.isModelLoaded() and self.asrModelHandler.modelLoaded is not None:  # Check modelLoaded isn't None (error state)
+        if self.stateManager.isRecording() and not self.asrModelHandler.isModelLoaded() and self.asrModelHandler.modelLoaded is not None:
             logInfo("Initial state is recording: ensuring model is loaded...")
             self.asrModelHandler.loadModel()
             if not self.asrModelHandler.isModelLoaded():
@@ -1484,7 +1542,7 @@ class SpeechToTextOrchestrator:
                     "CRITICAL: Initial model load failed. Recording disabled. Please check logs and model compatibility with the handler.")
                 self.stateManager.stopRecording()
 
-        self._startBackgroundThreads()
+        self._startBackgroundThreads()  # Now starts 3 threads
 
         initialStreamStarted = False
         if self.stateManager.isRecording():
@@ -1493,23 +1551,23 @@ class SpeechToTextOrchestrator:
             if not initialStreamStarted:
                 logError(
                     "CRITICAL: Failed to start audio stream initially. Recording disabled.")
-                self.stateManager.stopRecording()  # Disable recording if stream fails
+                self.stateManager.stopRecording()
 
     def _run_checkTimeoutsNGlobalState(self):
         """Check program and recording timeouts and manage global state."""
         if self.stateManager.checkProgramTimeout():
             logInfo("Maximum program duration reached.")
-            return False  # Signal to exit main loop
+            return False
 
         self.realTimeProcessor.clearBufferIfOutputDisabled()
 
-        if self.stateManager.isRecording():  # Only check recording-related timeouts if recording
+        if self.stateManager.isRecording():
             if self.stateManager.checkRecordingTimeout():
                 logInfo("Recording session timeout reached, stopping recording...")
-                self.toggleRecording()  # Use toggle logic to handle state and cleanup
+                self.toggleRecording()
             elif self.stateManager.checkIdleTimeout():
                 logInfo("Idle timeout reached, stopping recording...")
-                self.toggleRecording()  # Use toggle logic
+                self.toggleRecording()
 
         return True
 
@@ -1522,9 +1580,9 @@ class SpeechToTextOrchestrator:
             self._logDebug("Attempting to start audio stream (recording active)...")
             if not self.audioHandler.startStream():
                 logError("Failed to start/restart audio stream. Disabling recording.")
-                self.stateManager.stopRecording()  # Force stop recording if stream fails
+                self.stateManager.stopRecording()
                 time.sleep(1)
-                return False  # Signal to skip further processing in this loop iteration
+                return False
 
         elif not shouldStreamBeActive and isStreamActuallyActive:
             self._logDebug("Stopping audio stream (recording inactive)...")
@@ -1544,64 +1602,52 @@ class SpeechToTextOrchestrator:
             while True:
                 chunk = self.audioHandler.getAudioChunk()
                 if chunk is None:
-                    break  # Audio queue is empty
+                    break
                 if self.realTimeProcessor.processIncomingChunk(chunk):
-                    audioProcessedThisLoop = True  # Mark that we did work
+                    audioProcessedThisLoop = True
 
             return audioProcessedThisLoop
         else:
             return False
 
-    def _run_transcribeAndHandleOutput(self, audioProcessedThisLoop):
-        """Perform transcription and handle output when triggered."""
+    def _run_queueTranscriptionRequest(self, audioProcessedThisLoop):
+        """Checks if transcription should be triggered and queues the request for the worker thread."""
         if not self.stateManager.isOutputEnabled():
-            return  # Skip transcription entirely if output is disabled
+            return  # Skip queueing if output is disabled
 
-        if audioProcessedThisLoop:
+        if audioProcessedThisLoop:  # Check if audio buffer was potentially updated
             audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
 
             if audioDataToTranscribe is not None:
-                if self.asrModelHandler.isModelLoaded() and self.asrModelHandler.asrPipeline is not None:
+                try:
+                    sampleRate = self.config.get('actualSampleRate')
+                    queueItem = (audioDataToTranscribe, sampleRate)
+                    self.transcriptionRequestQueue.put(queueItem)
                     self._logDebug(
-                        f"Transcription triggered with {len(audioDataToTranscribe)} samples. Proceeding to ASR ({type(self.asrModelHandler).__name__}).")
-                    transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
-                        audioDataToTranscribe,
-                        self.config.get('actualSampleRate')
-                    )
-                    self.outputHandler.processTranscriptionResult(
-                        transcriptionResult,
-                        audioDataToTranscribe  # Pass audio data for loudness checks
-                    )
-                elif not self.asrModelHandler.isModelLoaded():
-                    logWarning(
-                        "Transcription triggered, but ASR model is not loaded. Skipping.")
-                    if self.config.get('transcriptionMode') == 'dictationMode':
-                        self.realTimeProcessor.clearBuffer()
-                        self.realTimeProcessor.isCurrentlySpeaking = False
-                        self.realTimeProcessor.silenceStartTime = None
-                        self._logDebug(
-                            "Reset dictation state after trigger despite model not being loaded.")
+                        f"Queued transcription request for {len(audioDataToTranscribe)} samples.")
+                except Exception as e:
+                    logError(f"Failed to queue transcription request: {e}")
 
     def _run_loopSleep(self):
         """Sleep briefly to prevent high CPU usage, especially if idle."""
-        time.sleep(0.01)  # ~10ms sleep yields CPU effectively
+        time.sleep(0.01)
 
     def run(self):
         """Main execution loop orchestrating the real-time transcription process."""
         logInfo("Starting main orchestrator loop...")
         try:
-            self._run_initialSetup()
+            self._run_initialSetup()  # Includes starting all threads now
 
             while self.stateManager.shouldProgramContinue():
                 if not self._run_checkTimeoutsNGlobalState():
-                    break  # Exit loop on timeout
+                    break
 
                 if not self._run_manageAudioStreamLifecycle():
-                    continue  # Skip further processing in this iteration
+                    continue
 
                 audioProcessedThisLoop = self._run_processAudioChunks()
 
-                self._run_transcribeAndHandleOutput(audioProcessedThisLoop)
+                self._run_queueTranscriptionRequest(audioProcessedThisLoop)
 
                 self._run_loopSleep()
 
@@ -1620,7 +1666,7 @@ class SpeechToTextOrchestrator:
 if __name__ == "__main__":
 
     userSettings = {
-        "modelName": "openai/whisper-large-v3",
+        "modelName": "nvidia/canary-180m-flash",
         "language": "en",
         "onlyCpu": False,
 
