@@ -1,9 +1,10 @@
+import math
 import queue
 import threading
 import time
-import math
 
 import keyboard
+import noisereduce as nr
 import numpy as np
 import pyautogui
 import sounddevice as sd
@@ -24,7 +25,9 @@ class SpeechToTextTranscriber:
                  outputEnabled=False,
                  sampleRate=16000,
                  channels=1,
-                 audio_threshold=0.01):
+                 removeTrailingDots=True,
+                 language="en",
+                 ):
 
         # Audio recording parameters
         self.sampleRate = sampleRate
@@ -36,7 +39,8 @@ class SpeechToTextTranscriber:
         self.consecutiveIdleTime = consecutiveIdleTime
         self.model_unloadTimeout = model_unloadTimeout
         self.modelName = modelName
-        self.audio_threshold = audio_threshold
+        self.removeTrailingDots = removeTrailingDots
+        self.language = language
 
         # Queue to store audio chunks
         self.audioQueue = queue.Queue()
@@ -71,7 +75,7 @@ class SpeechToTextTranscriber:
             print("Loading model to GPU...")
             self.asr = pipeline("automatic-speech-recognition",
                                 model=self.modelName,
-                                generate_kwargs={"language": "en"},
+                                generate_kwargs={"language": self.language},
                                 # Explicitly set language to English
                                 device=self.device)
             self.modelLoaded = True
@@ -208,17 +212,7 @@ class SpeechToTextTranscriber:
             audioChunk = self.audioQueue.get()
             if self.actualChannels > 1:
                 audioChunk = np.mean(audioChunk, axis=1)  # Convert stereo to mono
-
-            # Flatten and calculate RMS
-            audioChunk = audioChunk.flatten()
-            rms = np.sqrt(np.mean(np.square(audioChunk)))
-
-            # Only keep chunks above threshold
-            if rms >= self.audio_threshold:
-                self.audioBuffer = np.concatenate((self.audioBuffer, audioChunk))
-                print(f"chunk filtered (RMS: {rms:.4f})")
-            # else:
-            # print(f"Silent chunk filtered (RMS: {rms:.4f})")
+            self.audioBuffer = np.concatenate((self.audioBuffer, audioChunk.flatten()))
 
     def handleRecordingTiming(self):
         """Handle recording session timing"""
@@ -249,9 +243,17 @@ class SpeechToTextTranscriber:
                     # Update activity timestamp
                     self.lastActivityTime = currentTime
 
+                    # Apply noise reduction to the audio buffer
+                    reduced_noise_audio = nr.reduce_noise(
+                        y=self.audioBuffer,
+                        sr=self.actualSampleRate,
+                        stationary=False,  # Use non-stationary noise reduction
+                        prop_decrease=.8  # Adjust noise reduction strength (0 to 1)
+                    )
+
                     # Transcription call using raw
                     transcription = self.asr({
-                        "raw": self.audioBuffer,
+                        "raw": reduced_noise_audio,
                         "sampling_rate": self.actualSampleRate
                     })["text"]
                     print("Transcription:", transcription)
@@ -269,8 +271,13 @@ class SpeechToTextTranscriber:
         # Filter out empty transcriptions or just periods
         if transcription.strip() and transcription.strip() != ".":
             # Write the text only if output is enabled
+            cleanedText = transcription.strip()
+
+            # Remove trailing dots if the option is enabled
+            if self.removeTrailingDots:
+                cleanedText = cleanedText.rstrip('.')
+
             if self.outputEnabled:
-                cleanedText = transcription.strip()
                 pyautogui.write(cleanedText + " ")
             else:
                 print("Output is disabled. Text not typed.")
@@ -285,11 +292,13 @@ class SpeechToTextTranscriber:
             print(
                 f"Empty transcription detected ({self.emptyTranscriptionCount}/{maxEmptyTranscriptions})")
 
-            # Check if we've reached the maximum consecutive empty transcriptions
+            # Check if we've reached the maximum number of empty transcriptions
             if self.emptyTranscriptionCount >= maxEmptyTranscriptions:
-                print(f"Stopping recording after {self.consecutiveIdleTime} seconds of silence")
+                print(
+                    f"Reached {self.consecutiveIdleTime} seconds of silence, stopping recording...")
                 self.stopRecording()
                 self.recordingStartTime = 0
+                self.emptyTranscriptionCount = 0
 
     def cleanupInactiveRecording(self):
         """Clean up when recording is inactive"""
@@ -364,8 +373,7 @@ if __name__ == "__main__":
             isRecordingActive=True,  # Start with recording off
             outputEnabled=False,  # Start with output off
             sampleRate=16000,  # Higher sample rate
-            channels=1,
-            audio_threshold=0.0008
+            channels=1
         )
 
         # Use default input device
