@@ -1468,7 +1468,7 @@ class SpeechToTextOrchestrator:
                         audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
 
                         if audioDataToTranscribe is not None:
-                            if self.asrModelHandler.isModelLoaded() and self.asrModelHandler.model is not None:
+                            if self.asrModelHandler.isModelLoaded() and self.asrModelHandler.asrPipeline is not None:
                                 self._logDebug(
                                     f"Transcription triggered with {len(audioDataToTranscribe)} samples. Proceeding to ASR ({type(self.asrModelHandler).__name__}).")
                                 transcriptionResult = self.asrModelHandler.transcribeAudioSegment(
