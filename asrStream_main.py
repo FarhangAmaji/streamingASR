@@ -867,6 +867,11 @@ class TranscriptionOutputHandler:
         Processes the ASR result: checks for silence, filters false positives,
         formats, and triggers output (print/type). Updates idle timer.
         """
+        if audioData is None or len(audioData) == 0:
+            self._logDebug("Processing skipped: No audio data provided with transcription.")
+            self._handleSilentOrFilteredSegment()  # Treat as silent/filtered
+            return
+
         segmentLoudness = self._calculateSegmentLoudness(audioData)
         self._logDebug(f"Processing transcription. Segment Avg Loudness = {segmentLoudness:.6f}")
 
@@ -894,8 +899,8 @@ class TranscriptionOutputHandler:
 
         lowerCleanedText = cleanedText.lower()
 
-        if self._shouldSkipTranscriptionDueToSilence(segmentLoudness, audioData):
-            return False, ""  # Do not output if determined to be silence.
+        if self._shouldSkipTranscriptionDueToSilenceOrLowContent(segmentLoudness, audioData):
+            return False, ""  # Do not output if determined to be silence or insufficient content.
 
         if self._isFalsePositive(lowerCleanedText, segmentLoudness):
             return False, ""  # Do not output if filtered as a false positive.
@@ -913,57 +918,71 @@ class TranscriptionOutputHandler:
         self._logDebug(f"Final formatted text ready for output: '{formattedText}'")
         return True, formattedText
 
-    def _shouldSkipTranscriptionDueToSilence(self, segmentMeanLoudness, audioData):
+    def _shouldSkipTranscriptionDueToSilenceOrLowContent(self, segmentMeanLoudness, audioData):
         """
-        Checks if the transcription should be ignored based on refined silence rules,
-        considering both leading and trailing audio loudness if the overall segment is quiet.
+        Checks if the transcription should be ignored based on combined silence and
+        minimum content duration rules.
         Returns True if the segment SHOULD be skipped, False otherwise.
         """
-        silenceSkipThreshold = self.config.get('silenceSkip_threshold', 0.0002)
-        chunkSilenceThreshold = self.config.get('dictationMode_silenceLoudnessThreshold',
-                                                0.001)  # Reuse chunk threshold
+        if audioData is None or len(audioData) == 0:
+            self._logDebug("Silence check skipped: No audio data.")
+            return True  # Skip if no audio
+
         sampleRate = self.config.get('actualSampleRate')
+        chunkSilenceThreshold = self.config.get('dictationMode_silenceLoudnessThreshold', 0.001)
+        minLoudDuration = self.config.get('minLoudDurationForTranscription',
+                                          0.6)  # New minimum duration threshold
+        silenceSkipThreshold = self.config.get('silenceSkip_threshold',
+                                               0.0002)  # Average loudness threshold
+        checkLeadingSec = self.config.get('skipSilence_beforeNSecSilence', 0.0)
+        checkTrailingSec = self.config.get('skipSilence_afterNSecSilence', 0.3)
 
-        if segmentMeanLoudness < silenceSkipThreshold:
-            self._logDebug(
-                f"Segment mean loudness ({segmentMeanLoudness:.6f}) below skip threshold ({silenceSkipThreshold:.6f}). Checking potential overrides...")
+        if minLoudDuration > 0:
+            loudSamplesMask = np.abs(audioData) >= chunkSilenceThreshold
+            numLoudSamples = np.sum(loudSamplesMask)
+            totalLoudDuration = numLoudSamples / sampleRate
 
-            checkLeadingSec = self.config.get('skipSilence_beforeNSecSilence',
-                                              0.0)  # Get new config value
-            if checkLeadingSec > 0:
-                leadingSamples = int(checkLeadingSec * sampleRate)
-                if len(audioData) > 0:  # Ensure not processing empty array
-                    leadingAudio = audioData[:leadingSamples]
-                    leadingLoudness = np.mean(np.abs(leadingAudio))
+            if totalLoudDuration < minLoudDuration:
+                self._logDebug(
+                    f"Silence skip CONFIRMED: Total duration of loud samples ({totalLoudDuration:.2f}s) "
+                    f"is less than the required minimum ({minLoudDuration:.2f}s). "
+                    f"(Segment Avg Loudness: {segmentMeanLoudness:.6f})")
+                return True  # SKIP: Not enough potentially meaningful content
 
-                    if leadingLoudness >= chunkSilenceThreshold:
-                        self._logDebug(
-                            f"Silence skip OVERRIDDEN: Segment mean loudness low, but "
-                            f"leading {checkLeadingSec:.2f}s loudness ({leadingLoudness:.6f}) >= "
-                            f"chunk threshold ({chunkSilenceThreshold:.6f}).")
-                        return False  # DO NOT SKIP
-
-            checkTrailingSec = self.config.get('skipSilence_afterNSecSilence', 0.3)
-            if checkTrailingSec > 0:
-                trailingSamples = int(checkTrailingSec * sampleRate)
-                if len(audioData) >= trailingSamples:
-                    trailingAudio = audioData[-trailingSamples:]
-                    trailingLoudness = np.mean(np.abs(trailingAudio))
-
-                    if trailingLoudness >= chunkSilenceThreshold:
-                        self._logDebug(
-                            f"Silence skip OVERRIDDEN: Segment mean loudness low, but "
-                            f"trailing {checkTrailingSec:.2f}s loudness ({trailingLoudness:.6f}) >= "
-                            f"chunk threshold ({chunkSilenceThreshold:.6f}).")
-                        return False  # DO NOT SKIP
-
-            self._logDebug(
-                f"Silence skip CONFIRMED: Segment mean loudness low and no loudness overrides triggered "
-                f"(leading check: {checkLeadingSec:.2f}s, trailing check: {checkTrailingSec:.2f}s).")
-            return True  # SKIP the segment
-
-        else:
+        if segmentMeanLoudness >= silenceSkipThreshold:
             return False  # DO NOT SKIP
+
+        self._logDebug(
+            f"Segment passed min loud duration but mean loudness ({segmentMeanLoudness:.6f}) is below skip threshold ({silenceSkipThreshold:.6f}). Checking start/end overrides...")
+
+        if checkLeadingSec > 0:
+            leadingSamples = int(checkLeadingSec * sampleRate)
+            leadingAudio = audioData[:leadingSamples]
+            if len(leadingAudio) > 0:  # Avoid division by zero if leadingSamples=0 or audioData empty
+                leadingLoudness = np.mean(np.abs(leadingAudio))
+                if leadingLoudness >= chunkSilenceThreshold:
+                    self._logDebug(
+                        f"Silence skip OVERRIDDEN (Low Avg): Segment has sufficient total loud duration, "
+                        f"and leading {checkLeadingSec:.2f}s loudness ({leadingLoudness:.6f}) >= "
+                        f"chunk threshold ({chunkSilenceThreshold:.6f}).")
+                    return False  # DO NOT SKIP
+
+        if checkTrailingSec > 0:
+            trailingSamples = int(checkTrailingSec * sampleRate)
+            if len(audioData) >= trailingSamples:  # Check length for negative index
+                trailingAudio = audioData[-trailingSamples:]
+                trailingLoudness = np.mean(np.abs(trailingAudio))
+                if trailingLoudness >= chunkSilenceThreshold:
+                    self._logDebug(
+                        f"Silence skip OVERRIDDEN (Low Avg): Segment has sufficient total loud duration, "
+                        f"and trailing {checkTrailingSec:.2f}s loudness ({trailingLoudness:.6f}) >= "
+                        f"chunk threshold ({chunkSilenceThreshold:.6f}).")
+                    return False  # DO NOT SKIP
+
+        self._logDebug(
+            f"Silence skip CONFIRMED (Low Avg, No Overrides): Segment passed min loud duration but average loudness is low, "
+            f"and loudness at start ({checkLeadingSec:.2f}s) and end ({checkTrailingSec:.2f}s) did not override.")
+        return True  # SKIP the segment
 
     def _isFalsePositive(self, lowerCleanedText, segmentLoudness):
         """
@@ -1605,37 +1624,38 @@ if __name__ == "__main__":
         "language": "en",
         "onlyCpu": False,
 
-        "transcriptionMode": "dictationMode",  # "dictationMode" or "constantIntervalMode"
-        "dictationMode_silenceDurationToOutput": 0.6,  # Seconds of pause after speech
-        "dictationMode_silenceLoudnessThreshold": 0.0004,  # Chunk loudness threshold
-        "constantIntervalMode_transcriptionInterval": 4.0,  # Seconds between attempts
+        "transcriptionMode": "dictationMode",
+        "dictationMode_silenceDurationToOutput": 0.6,
+        "dictationMode_silenceLoudnessThreshold": 0.0004,
+        "constantIntervalMode_transcriptionInterval": 4.0,
 
-        "silenceSkip_threshold": 0.0002,  # Overall segment loudness to potentially skip
+        "minLoudDurationForTranscription": 0.3,
+        "silenceSkip_threshold": 0.0002,
         "skipSilence_beforeNSecSilence": 0.3,
         "skipSilence_afterNSecSilence": 0.3,
         "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen'],
         "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
 
         "removeTrailingDots": True,
-        "outputEnabled": False,  # Start with typing OFF
-        "isRecordingActive": True,  # Start with recording ON
+        "outputEnabled": False,
+        "isRecordingActive": True,
         "enableAudioNotifications": True,
-        "playEnableSounds": False,  # Disable sounds for 'recording on'/'output enabled'
+        "playEnableSounds": False,
 
         "recordingToggleKey": "win+alt+l",
         "outputToggleKey": "ctrl+q",
 
-        "maxDuration_recording": 10000,  # ~2.7 hours per session
-        "maxDuration_programActive": 2 * 60 * 60,  # 2 hours total runtime
-        "model_unloadTimeout": 10 * 60,  # Unload model after 10 mins inactive
-        "consecutiveIdleTime": 2 * 60,  # Stop recording after 2 mins silence
+        "maxDuration_recording": 10000,
+        "maxDuration_programActive": 2 * 60 * 60,
+        "model_unloadTimeout": 10 * 60,
+        "consecutiveIdleTime": 2 * 60,
 
-        "sampleRate": 16000,  # Target rate
-        "channels": 1,  # Mono
-        "blockSize": 1024,  # Frames per callback buffer
-        "deviceId": None,  # Use default device (change to index like 1, 3, etc. if needed)
+        "sampleRate": 16000,
+        "channels": 1,
+        "blockSize": 1024,
+        "deviceId": None,
 
-        "debugPrint": True  # Enable verbose logs
+        "debugPrint": True
     }
 
     try:
