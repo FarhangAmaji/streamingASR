@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import huggingface_hub
 import keyboard
 import numpy as np
 import pyautogui
@@ -197,6 +198,18 @@ class BaseTranscriber:
         if self.modelLoaded:
             self.unloadModel()
         self._debugPrint("BaseTranscriber cleanup complete.")
+
+    @staticmethod
+    def listAsrModels():
+        """
+        Static method to retrieve all ASR models from Hugging Face Hub.
+
+        Returns:
+            List[str]: A list of model IDs that support automatic speech recognition.
+        """
+        asrModels = [model.id for model in
+                     huggingface_hub.list_models(filter="automatic-speech-recognition")]
+        return asrModels
 
 
 class FileTranscriber(BaseTranscriber):
@@ -659,12 +672,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
                         f"DEBUG (Chunk): Loudness={chunk_loudness:.6f}, Threshold={self.dictationModeSilenceThreshold:.6f}")
 
                 if chunk_loudness >= self.dictationModeSilenceThreshold:
-                    if not self.isCurrentlySpeakingFlag:
-                        if self.debugPrint:
-                            print(
-                                f"DEBUG: Speech detected (Loudness {chunk_loudness:.6f} >= {self.dictationModeSilenceThreshold:.6f})")
-                        self.isCurrentlySpeakingFlag = True  # Set state to speaking
-
+                    if self.debugPrint:
+                        print(
+                            f"DEBUG: Speech detected (Loudness {chunk_loudness:.6f} >= {self.dictationModeSilenceThreshold:.6f})")
+                    self.isCurrentlySpeakingFlag = True
                     self.silence_start_time = None
                 else:
                     if self.isCurrentlySpeakingFlag:
@@ -928,13 +939,14 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
 
 if __name__ == "__main__":
+
     print("Starting SpeechToText Transcriber script...")
     try:
         transcriber = SpeechToTextTranscriber(
 
-            modelName="openai/whisper-large-v3",
+            modelName="nvidia/canary-180m-flash",
             language="en",  # User: Set transcription language
-            onlyCpu=True,  # User: Set to False to try using GPU (if available), True to force CPU
+            onlyCpu=False,  # User: Set to False to try using GPU (if available), True to force CPU
 
             transcriptionMode="dictationMode",  # User: "dictationMode" or "constantIntervalMode"
 
@@ -945,16 +957,16 @@ if __name__ == "__main__":
 
             silenceSkip_threshold=0.0002,
             skipSilence_afterNSecSilence=0.3,
-            commonFalseDetectedWords=["you", "thank you", "bye", 'amen', "hallelujah"],
+            commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=0.0008,
 
             removeTrailingDots=True,  # User: Clean trailing dots from output
             outputEnabled=False,  # User: Start with text output (typing) disabled
-            isRecordingActive=False,  # User: Start with recording disabled (wait for hotkey)
+            isRecordingActive=True,  # User: Start with recording disabled (wait for hotkey)
             playEnableSounds=False,  # User: Disable sounds for 'recording on' / 'output enabled'
 
-            recordingToggleKey="win+alt+k",  # User: Set your preferred hotkey for recording toggle
-            outputToggleKey="ctrl+alt+k",  # User: Set your preferred hotkey for output toggle
+            recordingToggleKey="win+alt+l",  # User: Hotkey to toggle recording on/off.
+            outputToggleKey="ctrl+q",  # User: Set your preferred hotkey for output toggle
 
             maxDuration_recording=10000,
             maxDuration_programActive=2 * 60 * 60,
