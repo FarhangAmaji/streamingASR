@@ -1520,6 +1520,9 @@ class SpeechToTextOrchestrator:
 
     def _run_transcribeAndHandleOutput(self, audioProcessedThisLoop):
         """Perform transcription and handle output when triggered."""
+        if not self.stateManager.isOutputEnabled():
+            return  # Skip transcription entirely if output is disabled
+
         if audioProcessedThisLoop:
             audioDataToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
 
@@ -1595,7 +1598,7 @@ if __name__ == "__main__":
         "silenceSkip_threshold": 0.0002,  # Overall segment loudness to potentially skip
         "skipSilence_afterNSecSilence": 0.3,  # Check trailing N sec loudness (0 to disable)
         "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen'],
-        "loudnessThresholdOf_commonFalseDetectedWords": 0.0003,
+        "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
 
         "removeTrailingDots": True,
         "outputEnabled": False,  # Start with typing OFF
