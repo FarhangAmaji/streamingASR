@@ -833,6 +833,11 @@ class RealTimeAudioProcessor:
             return 0.0
         return len(self.audioBuffer) / self.config.get('actualSampleRate')
 
+    def clearBufferIfOutputDisabled(self):
+        """Clears the buffer if output is disabled."""
+        if not self.stateManager.isOutputEnabled():
+            self.clearBuffer()
+
     def clearBuffer(self):
         """Clears the internal audio buffer."""
         if len(self.audioBuffer) > 0:
@@ -1469,6 +1474,9 @@ class SpeechToTextOrchestrator:
         if self.stateManager.checkProgramTimeout():
             logInfo("Maximum program duration reached.")
             return False  # Signal to exit main loop
+
+        self.realTimeProcessor.clearBufferIfOutputDisabled()
+
         if self.stateManager.isRecording():  # Only check recording-related timeouts if recording
             if self.stateManager.checkRecordingTimeout():
                 logInfo("Recording session timeout reached, stopping recording...")
