@@ -148,9 +148,9 @@ class WhisperModelHandler(AbstractAsrModelHandler):
 
     def _determineDevice(self):
         """Determines the compute device (CUDA GPU or CPU) for local execution."""
-        if self.config.get('onlyCpu', False):  # Check config setting to force CPU
+        if self.config.get('CPU', False):  # Check config setting to force CPU
             self.device = torch.device('cpu')
-            logInfo("CPU usage forced by configuration ('onlyCpu': True) for local Whisper model.")
+            logInfo("CPU usage forced by configuration ('CPU': True) for local Whisper model.")
         elif torch.cuda.is_available():
             self.device = torch.device('cuda')  # Defaults to cuda:0
             # Optionally, could allow specifying device index in config, e.g., 'cuda:1'

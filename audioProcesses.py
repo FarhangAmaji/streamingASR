@@ -148,13 +148,31 @@ class AudioHandler:
         self.config.set('actualChannels', actualChannels)
         logInfo(f"Audio configured for: Rate={actualRate} Hz, Channels={actualChannels}")
 
-    def _audioCallback(self, indata: np.ndarray, frames: int, timeInfo, status: sd.CallbackFlags):
+    def _audioCallback(self, indata: np.ndarray, frames: int, timeInfo, status: 'sd.CallbackFlags'):
         """
         Callback function executed by sounddevice stream thread for each audio block.
         Adds received audio data to the queue if recording is active.
+        Uses string literal for CallbackFlags type hint for robustness if sounddevice fails import.
         """
         if status:  # Log any status flags (e.g., input overflow/underflow)
-            logWarning(f"Audio callback status flags: {status}")
+            # Check if sd exists and status is an instance of its flags before accessing bits
+            # This adds robustness if sd failed import but somehow callback runs (unlikely but safe)
+            try:
+                # Check if sd was successfully imported before using its attributes
+                if sd and isinstance(status, sd.CallbackFlags):
+                    # Example: Check for specific flags if needed later
+                    # if status & sd.CallbackFlags.input_overflow:
+                    #     logWarning("Audio callback status: Input overflow detected!")
+                    # else:
+                    #     logWarning(f"Audio callback status flags: {status}")
+                    logWarning(
+                        f"Audio callback status flags: {status}")  # Log the status object directly
+                else:
+                    logWarning(
+                        f"Audio callback received status flags object (type: {type(status)}), but sounddevice module (sd) might be unavailable.")
+            except Exception as e:
+                logWarning(f"Error processing audio callback status flags: {e}")
+
         # Add data to queue only if application logic wants recording active
         if self.stateManager and self.stateManager.isRecording():
             # indata is a numpy array. Make a copy to avoid issues if sounddevice reuses buffer.

@@ -45,7 +45,7 @@ if __name__ == "__main__":
         "modelName": "openai/whisper-tiny.en",  # Example: Local Whisper (faster for testing)
         # "modelName": "nvidia/parakeet-rnnt-1.1b", # Example: Remote NeMo
         "language": "en",
-        "onlyCpu": False,
+        "CPU": False,
 
         # --- Remote Server Settings (Only needed for 'nvidia/' models) ---
         "wslServerUrl": "http://localhost:5001",

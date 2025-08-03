@@ -1,4 +1,9 @@
 # useRealtimeTranscription.py
+# ccc1
+#  Check or to_do:
+#   1. remove certain text from transcription (|endoftext|)
+#   2. Add ask AI later
+#   3. debugging modes (only if later, I require extensive debugging again)
 
 import os  # Import os for path joining if needed by logger setup
 import traceback
@@ -31,9 +36,9 @@ userSettings = {
     # For NeMo multilingual models (like Canary), specify the expected language code (e.g., 'en', 'es').
     "language": "en",
 
-    # Force CPU usage for local models (Whisper)?
+    # Force CPU usage for local models
     # If True, overrides automatic GPU detection for Whisper. Ignored by remote NeMo handler.
-    "onlyCpu": False,
+    "CPU": False,
 
     # --- Remote Server Settings (ONLY used if modelName starts with 'nvidia/') ---
     # URL where the wslNemoServer.py script listens inside WSL.
@@ -108,7 +113,7 @@ userSettings = {
     # List of common words/phrases that might be hallucinated by the ASR model during near-silence.
     # These will be filtered out ONLY if the segment's average loudness is also below 'loudnessThresholdOf_commonFalseDetectedWords'.
     "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', 'thanks', 'okay', 'uh',
-                                 'um', 'hmm'],
+                                 'um', 'hmm', '<|endoftext|>', ],
     # The loudness threshold used for filtering 'commonFalseDetectedWords'.
     "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
 
@@ -122,7 +127,7 @@ userSettings = {
 
     # Start listening to the microphone immediately when the application launches?
     # Can be toggled during runtime using the 'recordingToggleKey'.
-    "isRecordingActive": False,
+    "isRecordingActive": True,
 
     # Enable audio feedback sounds for events like recording start/stop, output enable/disable, model unload.
     # Requires the 'pygame' library to be installed (`pip install pygame`).
