@@ -1,4 +1,4 @@
-# useRealtimeTranscription.py
+# mainManager.py
 
 # ==============================================================================
 # Real-Time Speech-to-Text - Main Execution Script
@@ -21,6 +21,39 @@
 # Dependencies (Ensure installed on the system running this script):
 # - All dependencies listed in `mainTranscriberLogic.py`
 # ==============================================================================
+# ==============================================================================
+# Real-Time Speech-to-Text Transcription Tool - Core Logic
+# ==============================================================================
+#
+# Purpose:
+# - Contains the main application classes responsible for configuration, state,
+#   audio input/processing, output handling, system interaction (hotkeys, sounds),
+#   and model lifecycle management (when running locally).
+# - Defines the abstract base class for ASR models.
+# - Includes the concrete implementation for local models (e.g., Whisper via Transformers).
+# - Includes a client handler class (`RemoteNemoClientHandler`) responsible for
+#   communicating with a separate server process (running in WSL) for models
+#   that require it (e.g., NeMo models).
+#
+# Architecture Notes:
+# - This file forms the core of the application run on the primary OS (e.g., Windows).
+# - It uses composition: the main Orchestrator holds instances of components.
+# - ASR models are accessed through the AbstractAsrModelHandler interface,
+#   allowing either local processing or remote calls via the client handler.
+#
+# Dependencies (Ensure installed on the system running this code):
+# - Python standard libraries (abc, gc, os, queue, threading, time, pathlib, platform, subprocess, shutil, string)
+# - sounddevice: For audio input.
+# - soundfile: For audio file operations (used by FileTranscriber).
+# - numpy: For numerical audio data manipulation.
+# - torch: Required by Transformers and potentially other local models.
+# - transformers: For Hugging Face models (like Whisper).
+# - huggingface_hub: For listing models.
+# - keyboard: For global hotkey monitoring.
+# - pygame: For audio notifications.
+# - requests: For communicating with the WSL ASR server (used by RemoteNemoClientHandler).
+# - pyautogui: (Optional, for Windows native typing) - install if needed.
+# ==============================================================================
 
 import os
 import platform
@@ -32,47 +65,12 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-# --- Import Core Logic Components ---
-# Assuming mainTranscriberLogic.py is in the same directory or Python path
-try:
-    from mainTranscriberLogic import (
-        ConfigurationManager,
-        StateManager,
-        AudioHandler,
-        RealTimeAudioProcessor,
-        TranscriptionOutputHandler,
-        SystemInteractionHandler,
-        AbstractAsrModelHandler,  # Base class
-        WhisperModelHandler,  # Local Whisper implementation
-        RemoteNemoClientHandler,  # Client for remote NeMo server
-        ModelLifecycleManager,
-        logDebug, logInfo, logWarning, logError  # Logging helpers
-    )
-except ImportError as e:
-    print(f"ERROR: Failed to import core logic from mainTranscriberLogic.py: {e}")
-    print("Ensure mainTranscriberLogic.py is in the same directory or accessible via PYTHONPATH.")
-    exit(1)
-
-
-def convertWindowsPathToWsl(windowsPath):
-    """Converts an absolute Windows path to its WSL equivalent (/mnt/...)."""
-    pathStr = str(
-        Path(windowsPath).resolve())  # Ensure absolute path, convert Path object to string
-    if platform.system() != "Windows":
-        # If not on Windows, assume it's already a Linux-style path
-        return pathStr
-
-    if ':' not in pathStr:
-        # Cannot reliably convert relative paths
-        logWarning(f"Cannot convert potentially relative Windows path to WSL: {pathStr}")
-        return pathStr
-
-    drive, tail = pathStr.split(':', 1)
-    driveLower = drive.lower()
-    # Convert backslashes and remove leading slash if present from split
-    tail = tail.replace('\\', '/').lstrip('/')
-    wslPath = f"/mnt/{driveLower}/{tail}"
-    return wslPath
+from audioProcesses import AudioHandler, RealTimeAudioProcessor
+from managers import ConfigurationManager, StateManager, ModelLifecycleManager
+from modelHandlers import WhisperModelHandler, RemoteNemoClientHandler
+from systemInteractions import SystemInteractionHandler
+from tasks import TranscriptionOutputHandler
+from utils import logWarning, logDebug, convertWindowsPathToWsl, logInfo, logError
 
 
 # ==================================
@@ -843,136 +841,3 @@ class SpeechToTextOrchestrator:
             self.stateManager.stopProgram()  # Ensure cleanup runs
         finally:
             self._cleanup()  # Essential cleanup routine
-
-
-# ==================================
-# Main Execution Block
-# ==================================
-if __name__ == "__main__":
-
-    # --- User Configuration ---
-    # Define configuration as a dictionary. Adjust these values as needed.
-    userSettings = {
-        # --- Core Model Settings ---
-        # Choose the ASR model. Examples:
-        # "modelName": "openai/whisper-large-v3",   # Local Whisper (requires Transformers)
-        # "modelName": "openai/whisper-medium.en", # Local Whisper (English-only, smaller)
-        "modelName": "nvidia/canary-180m-flash",
-        # Remote NeMo (requires WSL server running wslNemoServer.py)
-        # "modelName": "nvidia/parakeet-rnnt-1.1b", # Remote NeMo (larger, requires WSL server)
-
-        "language": "en",  # Language code (e.g., 'en', 'es'). Use None for Whisper auto-detect.
-        "onlyCpu": False,  # Force CPU for local models (Whisper)? Ignored by remote NeMo handler.
-
-        # --- Remote Server Settings (ONLY used if modelName starts with 'nvidia/') ---
-        "wslServerUrl": "http://localhost:5001",  # URL where wslNemoServer.py listens
-        "wslDistributionName": "Ubuntu-22.04",
-        # *** CHANGE THIS to your actual WSL distribution name (e.g., Ubuntu, Debian) *** Use `wsl -l` in CMD to check.
-        "serverRequestTimeout": 15.0,  # Seconds client waits for server response before timeout
-        "unloadRemoteModelOnExit": True,
-        # Ask WSL server to unload model when this app closes? Set to False if server should persist.
-
-        # --- Transcription Mode & Settings ---
-        "transcriptionMode": "dictationMode",  # "dictationMode" or "constantIntervalMode"
-        "dictationMode_silenceDurationToOutput": 0.6,
-        # Seconds of silence after speech to trigger output
-        "dictationMode_silenceLoudnessThreshold": 0.0004,
-        # Audio level below which is considered silence (adjust based on mic sensitivity)
-        "constantIntervalMode_transcriptionInterval": 4.0,
-        # Seconds between transcriptions in constant interval mode
-
-        # --- Silence Skipping & Filtering (Applied in Output Handler) ---
-        # These help filter out noise or unwanted short utterances.
-        "minLoudDurationForTranscription": 0.3,
-        # Min required total seconds of audio *above* silence threshold in a segment to be considered valid (0 to disable)
-        "silenceSkip_threshold": 0.0002,
-        # Average loudness across a segment below which *extra* checks apply (using start/end loudness)
-        "skipSilence_beforeNSecSilence": 0.3,
-        # If avg loudness is low, check loudness in first N sec (if loud enough, override skip) (0 to disable override)
-        "skipSilence_afterNSecSilence": 0.3,
-        # If avg loudness is low, check loudness in last N sec (if loud enough, override skip) (0 to disable override)
-        "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', 'thanks', 'okay', 'uh',
-                                     'um', 'hmm'],
-        # List of words to filter if segment loudness is below the next threshold
-        "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
-        # Loudness below which words in 'commonFalseDetectedWords' list are filtered out
-
-        # --- General Behavior ---
-        "removeTrailingDots": True,  # Remove "..." or "." from end of transcription
-        "outputEnabled": False,
-        # Initial state of sending output (typing/clipboard) - toggled by hotkey `outputToggleKey`
-        "isRecordingActive": True,
-        # Start recording immediately on launch? Toggled by hotkey `recordingToggleKey`.
-        "enableAudioNotifications": True,
-        # Play sounds for events like start/stop (requires pygame)
-        "playEnableSounds": False,
-        # Play sounds specifically for 'recording ON' and 'output ENABLED' events?
-        "enableTypingOutput": True,
-        # Master switch for simulated typing / clipboard output (controlled by `outputEnabled` state)
-
-        # --- Hotkeys ---
-        # See https://github.com/boppreh/keyboard#keyboard.add_hotkey for key syntax
-        "recordingToggleKey": "windows+alt+l",  # Key combination to toggle recording on/off
-        "outputToggleKey": "ctrl+q",
-        # Key combination to toggle text output (typing/clipboard) on/off
-
-        # --- Timeouts ---
-        # Set to 0 to disable a specific timeout
-        "maxDurationRecording": 0,
-        # Max seconds for a single recording session (0 = no limit). Recording stops automatically after this duration.
-        "maxDurationProgramActive": 0,
-        # Max seconds the entire program will run before automatically exiting (0 = no limit).
-        "model_unloadTimeout": 10 * 60,
-        # Seconds of inactivity (no recording) before automatically unloading model (local or remote) to save resources (0 = never unload).
-        "consecutiveIdleTime": 2 * 60,
-        # Seconds of no valid transcription output *while recording is active* before stopping recording automatically (0 = no limit).
-
-        # --- Audio Settings ---
-        "sampleRate": 16000,
-        # Desired sample rate (Hz). Whisper/NeMo typically use 16000. Check device compatibility.
-        "channels": 1,
-        # Number of audio channels (1 = mono, 2 = stereo). Mono is usually preferred.
-        "blockSize": 1024,
-        # Audio buffer size (samples per callback chunk). Smaller values may reduce latency but increase CPU load. Powers of 2 are common.
-        "deviceId": None,
-        # Specific audio input device ID (integer or string name part). Set to None to use the system's default input device. Use 'python -m sounddevice' to list available devices.
-
-        # --- Debugging ---
-        "debugPrint": False
-        # Enable detailed DEBUG log messages for troubleshooting? Set to True for development.
-    }
-
-    # --- Instantiate and Run Orchestrator ---
-    orchestrator = None  # Initialize to None ensures cleanup can be attempted even if __init__ fails
-    try:
-        logInfo("Initializing application...")
-        # Create the main orchestrator instance, passing all settings
-        orchestrator = SpeechToTextOrchestrator(**userSettings)
-        logInfo("Starting application run loop...")
-        # Start the main loop (this call is blocking until the program exits)
-        orchestrator.run()
-
-    except ValueError as e:
-        # Catch specific configuration errors (like missing required settings)
-        logError(f"\n!!! CONFIGURATION ERROR: {e}")
-        logError("Please check the 'userSettings' dictionary in useRealtimeTranscription.py.")
-    except ImportError as e:
-        # Catch errors importing necessary libraries
-        logError(f"\n!!! IMPORT ERROR: {e}")
-        logError(
-            "Please ensure all required libraries (like sounddevice, torch, transformers, etc.) are installed correctly in your Python environment.")
-    except Exception as e:
-        # Catch any other unexpected errors during initialization or the main loop
-        logError(f"\n!!! PROGRAM CRITICAL ERROR: {e}")
-        logError(traceback.format_exc())  # Print the full traceback for debugging
-    finally:
-        # This block always runs, even if errors occur or the program exits normally
-        logInfo("Application has stopped.")
-        # Attempt cleanup only if the orchestrator was successfully initialized
-        # and might still think the program is active (e.g., due to unclean exit)
-        if orchestrator and hasattr(orchestrator,
-                                    'stateManager') and orchestrator.stateManager and orchestrator.stateManager.isProgramActive:
-            logWarning("Performing emergency cleanup due to unexpected exit...")
-            orchestrator._cleanup()
-
-    print("Exiting useRealtimeTranscription.py script.")  # Final message indicating script end

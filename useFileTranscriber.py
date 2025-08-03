@@ -24,23 +24,14 @@
 # ==============================================================================
 
 import os
-from pathlib import Path
 import time
 import traceback
+from pathlib import Path
 
-# --- Import Core Logic Components ---
-try:
-    from mainTranscriberLogic import (
-        ConfigurationManager,
-        FileTranscriber,
-        WhisperModelHandler,  # Local handler
-        RemoteNemoClientHandler,  # Remote client handler
-        logInfo, logError, logWarning  # Logging helpers
-    )
-except ImportError as e:
-    print(f"ERROR: Failed to import core logic from mainTranscriberLogic.py: {e}")
-    print("Ensure mainTranscriberLogic.py is in the same directory or accessible via PYTHONPATH.")
-    exit(1)
+from managers import ConfigurationManager
+from modelHandlers import WhisperModelHandler, RemoteNemoClientHandler
+from tasks import FileTranscriber
+from utils import logInfo, logError
 
 # ==================================
 # Example Configuration & Execution
