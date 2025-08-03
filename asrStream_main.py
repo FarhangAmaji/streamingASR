@@ -1,13 +1,3 @@
-import sys
-import os  # Optional: To see current user and working dir
-
-print("--- Script Execution Info ---")
-print("User:", os.getenv('USER'), "Effective User ID:", os.geteuid())  # See who the script runs as
-print("Current Directory:", os.getcwd())
-print("--- sys.path Start ---")
-for path_entry in sys.path:
-    print(path_entry)
-print("--- sys.path End ---")
 import abc  # Abstract Base Classes
 import gc
 import os
@@ -21,6 +11,7 @@ import time
 from pathlib import Path
 
 import huggingface_hub
+import keyboard
 import numpy as np
 import pygame
 import sounddevice as sd
@@ -31,10 +22,10 @@ from transformers import pipeline
 try:
     from nemo.collections.asr.models import ASRModel
 
-    NEMO_AVAILABLE = True
+    nemoAvailable = True
 except Exception:
     ASRModel = None  # Define as None if NeMo is not installed
-    NEMO_AVAILABLE = False
+    nemoAvailable = False
 
 
 def logDebug(message, debugPrintFlag):
@@ -56,6 +47,28 @@ def logWarning(message):
 def logError(message):
     """Helper function for error messages."""
     print(f"ERROR: {message}")
+
+
+_pyautoguiAvailable = False
+_pyautoguiErrorMessage = ""
+if platform.system() == "Windows":
+    try:
+        import pyautogui
+
+        _pyautoguiAvailable = True
+        logInfo("PyAutoGUI loaded successfully (for potential Windows native typing).")
+    except ImportError:
+        _pyautoguiErrorMessage = "PyAutoGUI library not found. Install it (`pip install pyautogui`) to enable typing output on Windows."
+        logWarning(_pyautoguiErrorMessage)
+    except Exception as e:
+        _pyautoguiErrorMessage = f"PyAutoGUI could not initialize a display connection on Windows: {e}. Typing output will be disabled."
+        logWarning(_pyautoguiErrorMessage)
+elif platform.system() == "Linux":
+    _pyautoguiAvailable = False  # Explicitly false on Linux for this logic
+    logInfo("Running on Linux (or WSL). PyAutoGUI typing will not be used for output.")
+else:
+    _pyautoguiAvailable = False  # Other OS
+    logInfo(f"Running on unknown OS: {platform.system()}. PyAutoGUI typing will not be used.")
 
 
 class AbstractAsrModelHandler(abc.ABC):
@@ -175,15 +188,15 @@ class WhisperModelHandler(AbstractAsrModelHandler):
         self._monitorMemory()
         self._cudaClean()
 
-        gen_kwargs = {"language": self.config.get('language')}
-        gen_kwargs["return_timestamps"] = True
-        self._logDebug(f"Pipeline generate_kwargs: {gen_kwargs}")
+        genKwargs = {"language": self.config.get('language')}
+        genKwargs["return_timestamps"] = True
+        self._logDebug(f"Pipeline generate_kwargs: {genKwargs}")
 
         try:
             self.asrPipeline = pipeline(
                 "automatic-speech-recognition",
                 model=self.config.get('modelName'),
-                generate_kwargs=gen_kwargs,
+                generate_kwargs=genKwargs,
                 device=self.device
             )
             self.modelLoaded = True
@@ -302,7 +315,7 @@ class NemoModelHandler(AbstractAsrModelHandler):
 
     def _checkNemoAvailability(self):
         """Checks if the NeMo toolkit is installed."""
-        if not NEMO_AVAILABLE:
+        if not nemoAvailable:
             errMsg = "NeMo toolkit not found, cannot use Nvidia ASR models. Install with: pip install nemo_toolkit[asr]"
             logError(errMsg)
             raise ImportError(errMsg)
@@ -350,7 +363,7 @@ class NemoModelHandler(AbstractAsrModelHandler):
         if self.modelLoaded:
             self._logDebug(f"NeMo model '{self.config.get('modelName')}' already loaded.")
             return
-        if not NEMO_AVAILABLE:
+        if not nemoAvailable:
             logError("Cannot load NeMo model: NeMo toolkit not installed.")
             return  # Prevent loading if dependency is missing
 
@@ -908,12 +921,12 @@ class TranscriptionOutputHandler:
             self._logDebug("Transcription is effectively empty after initial strip.")
             return False, ""  # Do not output empty or solely dot results.
 
-        lowerCleanedText = cleanedText.lower()
+        cleanedText_lower = cleanedText.lower()
 
         if self._shouldSkipTranscriptionDueToSilenceOrLowContent(segmentLoudness, audioData):
             return False, ""  # Do not output if determined to be silence or insufficient content.
 
-        if self._isFalsePositive(lowerCleanedText, segmentLoudness):
+        if self._isFalsePositive(cleanedText_lower, segmentLoudness):
             return False, ""  # Do not output if filtered as a false positive.
 
         formattedText = cleanedText
@@ -995,7 +1008,7 @@ class TranscriptionOutputHandler:
             f"and loudness at start ({checkLeadingSec:.2f}s) and end ({checkTrailingSec:.2f}s) did not override.")
         return True  # SKIP the segment
 
-    def _isFalsePositive(self, lowerCleanedText, segmentLoudness):
+    def _isFalsePositive(self, cleanedText_lower, segmentLoudness):
         """
         Checks if the transcription is a common false word detected in low loudness.
         Cleans the input text further (removing punctuation) for more robust matching.
@@ -1007,12 +1020,12 @@ class TranscriptionOutputHandler:
         import string
 
         translator = str.maketrans('', '', string.punctuation)
-        checkText = lowerCleanedText.translate(translator).strip()
+        checkText = cleanedText_lower.translate(translator).strip()
         checkText = ' '.join(checkText.split())
 
-        normalizedFalseWords = [w.lower() for w in commonFalseWords]
+        commonFalseWords_normalized = [w.lower() for w in commonFalseWords]
 
-        if checkText in normalizedFalseWords:
+        if checkText in commonFalseWords_normalized:
             loudnessThreshold = self.config.get('loudnessThresholdOf_commonFalseDetectedWords',
                                                 0.0008)
             if segmentLoudness < loudnessThreshold:
@@ -1044,7 +1057,7 @@ class SystemInteractionHandler:
     """
     Manages interactions with keyboard for hotkeys, pygame for sound,
     and handles text output either via simulated typing (Windows native)
-    or Windows clipboard copy (WSL), adapting based on the environment.
+    or Windows clipboard copy (WSL).
     """
 
     def __init__(self, config):
@@ -1053,65 +1066,46 @@ class SystemInteractionHandler:
         self.isMixerInitialized = False
         self._setupAudioNotifications()
 
-        self.textOutputMethod = "none"  # Default: 'none', 'pyautogui', 'clipboard'
+        self.textOutputMethod = "none"  # Default to no output
         self.clipExePath = None
-        self._pyautogui = None  # Stores the imported module if available
+        self.canUsePyautogui = False  # Assume false initially
         self.isWslEnvironment = False
 
-        outputEnabledByConfig = self.config.get('enableTypingOutput', True)
-        osName = platform.system()
+        outputEnabledByConfig = self.config.get('enableTypingOutput', True)  # Reuse setting name
 
+        osName = platform.system()
         if osName == "Linux" and "WSL_DISTRO_NAME" in os.environ:
             self.isWslEnvironment = True
             logInfo("WSL environment detected.")
         elif osName == "Windows":
             logInfo("Windows Native environment detected.")
         else:
-            logInfo(
-                f"Non-Windows/Non-WSL environment detected ({osName}). Text output may be limited.")
+            logInfo(f"Non-Windows/Non-WSL environment detected ({osName}).")
 
-        if not outputEnabledByConfig:
-            logInfo("Text output globally disabled by configuration ('enableTypingOutput': False).")
-            self.textOutputMethod = "none"
-        else:
+        if outputEnabledByConfig:
             if osName == "Windows" and not self.isWslEnvironment:
-                logInfo("Attempting to enable PyAutoGUI for native Windows typing...")
-                try:
-                    import pyautogui
-                    self._pyautogui = pyautogui  # Store the module
-                    try:
-                        self._pyautogui.size()  # Raises exception if display unavailable
-                        self.textOutputMethod = "pyautogui"
-                        logInfo("Text Output Method: PyAutoGUI (Windows Native Typing)")
-                    except Exception as e:
-                        logWarning(
-                            f"PyAutoGUI imported but could not connect to display: {e}. Typing output disabled.")
-                        self._pyautogui = None  # Ensure it's None if unusable
-                        self.textOutputMethod = "none"
-                except ImportError:
+                if _pyautoguiAvailable:
+                    self.textOutputMethod = "pyautogui"
+                    self.canUsePyautogui = True
+                    logInfo("Text Output Method: PyAutoGUI (Windows Native Typing)")
+                else:
                     logWarning(
-                        "PyAutoGUI library not found. Install it (`pip install pyautogui`) to enable typing output on Windows. Text output disabled.")
+                        f"PyAutoGUI is unavailable on Windows ({_pyautoguiErrorMessage}). Text output disabled.")
                     self.textOutputMethod = "none"
-                except Exception as e:
-                    logWarning(
-                        f"Failed to initialize PyAutoGUI on Windows: {e}. Typing output disabled.")
-                    self.textOutputMethod = "none"
-
             elif self.isWslEnvironment:
-                logInfo("Attempting to enable Windows Clipboard output via clip.exe for WSL...")
                 self.clipExePath = shutil.which('clip.exe')
                 if self.clipExePath:
                     self.textOutputMethod = "clipboard"
                     logInfo(f"Text Output Method: Windows Clipboard via '{self.clipExePath}' (WSL)")
                 else:
-                    logWarning(
-                        "Text output disabled in WSL: 'clip.exe' not found in path. Cannot copy to Windows clipboard.")
+                    logWarning("Text output disabled in WSL: 'clip.exe' not found in path.")
                     self.textOutputMethod = "none"
-
             else:
-                logInfo(
-                    f"Text output is not configured for this OS ({osName}) or environment. Output disabled.")
+                logInfo(f"Text output is not supported on this OS ({osName}) or configuration.")
                 self.textOutputMethod = "none"
+        else:
+            logInfo("Text output globally disabled by configuration ('enableTypingOutput': False).")
+            self.textOutputMethod = "none"
 
     def _logDebug(self, message):
         logDebug(message, self.config.get('debugPrint'))
@@ -1178,85 +1172,50 @@ class SystemInteractionHandler:
         maxDuration = self.config.get('maxDurationProgramActive', 3600)
         recordingToggleKey = self.config.get('recordingToggleKey')
         outputToggleKey = self.config.get('outputToggleKey')
-        keyboard_module = None  # Define variable outside try block
 
-        try:
-            import keyboard  # Import the module
-            keyboard_module = keyboard  # Assign to variable
-            keyboardAvailable = True
-            logInfo("Keyboard library imported successfully for hotkey monitoring.")  # Added log
-        except ImportError:
-            logError("Keyboard library not installed. Hotkeys disabled.")
-            logError("Try: sudo /path/to/your/python3 -m pip install keyboard")
-            keyboardAvailable = False
-        except Exception as e:
-            logError(f"Failed to initialize keyboard library: {e}. Hotkeys disabled.")
-            import traceback
-            logError("--- Traceback for keyboard init error ---")
-            logError(traceback.format_exc())
-            logError("---------------------------------------")
-            keyboardAvailable = False
-
-        while keyboardAvailable and orchestrator.stateManager.shouldProgramContinue() and \
+        while orchestrator.stateManager.shouldProgramContinue() and \
                 (time.time() - threadStartTime) < maxDuration:
             try:
-                if keyboard_module.is_pressed(recordingToggleKey):  # Use the imported module
+                if keyboard.is_pressed(recordingToggleKey):
                     self._logDebug(f"Hotkey '{recordingToggleKey}' pressed.")
                     orchestrator.toggleRecording()
-                    self._waitForKeyRelease(keyboard_module, recordingToggleKey)  # Pass module
+                    self._waitForKeyRelease(recordingToggleKey)
 
-                if keyboard_module.is_pressed(outputToggleKey):  # Use the imported module
+                if keyboard.is_pressed(outputToggleKey):
                     self._logDebug(f"Hotkey '{outputToggleKey}' pressed.")
                     orchestrator.toggleOutput()  # Toggles stateManager.outputEnabled
-                    self._waitForKeyRelease(keyboard_module, outputToggleKey)  # Pass module
+                    self._waitForKeyRelease(outputToggleKey)
 
+            except ImportError:
+                logError("Keyboard library not installed or permission denied. Hotkeys disabled.")
+                logError("Try running with sudo (Linux/macOS) or installing 'keyboard'.")
+                break
             except Exception as e:
-                logError(f"Error in keyboard monitoring loop: {e}")  # Log the basic error string
-                import traceback
-                logError("--- Traceback for keyboard monitoring loop error ---")
-                logError(traceback.format_exc())  # Print the full traceback
-                logError("--------------------------------------------------")
+                logError(f"Error in keyboard monitoring thread: {e}")
+                time.sleep(1)
 
-                time.sleep(1)  # Pause after error
-
-            time.sleep(0.05)  # Main loop sleep outside the except block
+            time.sleep(0.05)
 
         logInfo("Keyboard shortcut monitor thread stopping.")
-        if not orchestrator.stateManager.shouldProgramContinue():
-            pass  # Already stopping
-        else:
-            if not keyboardAvailable:
-                logWarning("Stopping program because hotkey monitoring is not available.")
-            elif (time.time() - threadStartTime) < maxDuration:
-                logWarning("Stopping program because hotkey monitoring loop exited unexpectedly.")
+        orchestrator.stateManager.stopProgram()
 
-            if not keyboardAvailable or (time.time() - threadStartTime) < maxDuration:
-                orchestrator.stateManager.stopProgram()  # Signal main loop to stop
-
-    def _waitForKeyRelease(self, keyboard_module, key):
+    def _waitForKeyRelease(self, key):
         """Waits until the specified key is released to prevent rapid toggling."""
         startTime = time.time()
         timeout = 2.0
-        try:
-            while keyboard_module.is_pressed(key):
-                if time.time() - startTime > timeout:
-                    self._logDebug(f"Warning: Timeout waiting for key release '{key}'.")
-                    break
-                time.sleep(0.05)
-            self._logDebug(f"Hotkey '{key}' released.")
-        except Exception as e:
-            self._logDebug(f"Error checking key release for '{key}': {e}")
+        while keyboard.is_pressed(key):
+            if time.time() - startTime > timeout:
+                self._logDebug(f"Warning: Timeout waiting for key release '{key}'.")
+                break
+            time.sleep(0.05)
+        self._logDebug(f"Hotkey '{key}' released.")
 
     def isModifierKeyPressed(self, key):
         """Checks if a specific modifier key (e.g., 'ctrl', 'alt', 'shift') is pressed."""
         try:
-            import keyboard
             return keyboard.is_pressed(key)
-        except (ImportError, NameError, RuntimeError) as e:  # Catch keyboard errors
-            self._logDebug(f"Could not check modifier key '{key}' (keyboard library issue?): {e}")
-            return False
-        except Exception as e:  # Catch other unexpected errors
-            self._logDebug(f"Unexpected error checking modifier key '{key}': {e}")
+        except Exception as e:
+            self._logDebug(f"Could not check modifier key '{key}': {e}")
             return False
 
     def typeText(self, text):
@@ -1266,17 +1225,17 @@ class SystemInteractionHandler:
         """
 
         if self.textOutputMethod == "pyautogui":
-            if self._pyautogui:
+            if self.canUsePyautogui:  # Double check flag set in init
                 try:
-                    self._pyautogui.write(text)
+                    pyautogui.write(text)
                     self._logDebug(f"Typed text via PyAutoGUI: '{text[:50]}...'")
                 except Exception as e:
                     logWarning(f"PyAutoGUI write failed during execution: {e}")
             else:
-                self._logDebug("Typing skipped: PyAutoGUI method selected but module unavailable.")
+                self._logDebug("Typing skipped: PyAutoGUI method selected but unavailable.")
 
         elif self.textOutputMethod == "clipboard":
-            if self.clipExePath:  # Check path is valid
+            if self.clipExePath:  # Double check path is valid
                 try:
                     process = subprocess.run(
                         [self.clipExePath],
@@ -1284,18 +1243,14 @@ class SystemInteractionHandler:
                         encoding='utf-8',  # Ensure correct encoding for clipboard
                         check=True,  # Raise error on failure
                         stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=5  # Add a timeout to prevent hanging
+                        stderr=subprocess.PIPE
                     )
-                    self._logDebug(
-                        f"Copied text to Windows clipboard via clip.exe: '{text[:50]}...'")
+                    self._logDebug(f"Copied text to Windows clipboard: '{text[:50]}...'")
                 except FileNotFoundError:
                     logError(
                         f"Error copying to clipboard: '{self.clipExePath}' not found during execution.")
                     self.clipExePath = None  # Mark as unavailable
                     self.textOutputMethod = "none"
-                except subprocess.TimeoutExpired:
-                    logError(f"Error running clip.exe: Process timed out.")
                 except subprocess.CalledProcessError as e:
                     logError(f"Error running clip.exe: {e}")
                     logError(f"clip.exe stderr: {e.stderr.decode('utf-8', errors='ignore')}")
@@ -1480,7 +1435,7 @@ class SpeechToTextOrchestrator:
         if modelNameLower.startswith("nvidia/"):
             logInfo(
                 f"Detected Nvidia model prefix. Attempting to use NemoModelHandler for '{modelName}'.")
-            if NEMO_AVAILABLE:
+            if nemoAvailable:
                 try:
                     self.asrModelHandler = NemoModelHandler(self.config)
                 except ImportError as e:
@@ -1595,31 +1550,19 @@ class SpeechToTextOrchestrator:
         logInfo("Transcription Worker thread stopping.")
 
     def _startBackgroundThreads(self):
-        """
-        Starts threads for model management and transcription.
-        Conditionally starts the hotkey monitor only if not on Linux (where it's often problematic).
-        """
+        """Starts threads for hotkeys, model management, and transcription."""
         self._logDebug("Starting background threads...")
         self.threads = []  # Clear list
-        threadCount = 0  # Keep track of actual started threads
 
-        if platform.system() != "Linux":
-            logInfo("Attempting to start keyboard shortcut monitor thread (Non-Linux OS)...")
-            keyboardThread = threading.Thread(
-                target=self.systemInteractionHandler.monitorKeyboardShortcuts,
-                args=(self,),
-                name="KeyboardMonitorThread",
-                daemon=True
-            )
-            self.threads.append(keyboardThread)
-            keyboardThread.start()
-            threadCount += 1
-        else:
-            logWarning(
-                f"Running on Linux ({platform.system()}). Global hotkey monitoring thread is disabled.")
-            logInfo("Use Ctrl+C to stop the script.")
+        keyboardThread = threading.Thread(
+            target=self.systemInteractionHandler.monitorKeyboardShortcuts,
+            args=(self,),
+            name="KeyboardMonitorThread",
+            daemon=True
+        )
+        self.threads.append(keyboardThread)
+        keyboardThread.start()
 
-        logInfo("Starting Model Lifecycle Manager thread...")
         modelThread = threading.Thread(
             target=self.modelLifecycleManager.manageModelLifecycle,
             name="ModelManagerThread",
@@ -1627,19 +1570,16 @@ class SpeechToTextOrchestrator:
         )
         self.threads.append(modelThread)
         modelThread.start()
-        threadCount += 1
 
-        logInfo("Starting Transcription Worker thread...")
         transcriptionThread = threading.Thread(
-            target=self._transcriptionWorkerLoop,
+            target=self._transcriptionWorkerLoop,  # Target the new worker method
             name="TranscriptionWorkerThread",
-            daemon=True
+            daemon=True  # Ensure it exits if main thread exits unexpectedly
         )
         self.threads.append(transcriptionThread)
         transcriptionThread.start()
-        threadCount += 1
 
-        self._logDebug(f"Started {threadCount} background threads.")
+        self._logDebug(f"Started {len(self.threads)} background threads.")
 
     def toggleRecording(self):
         """Toggles the recording state. Called by systemInteractionHandler."""
@@ -1831,7 +1771,7 @@ class SpeechToTextOrchestrator:
 if __name__ == "__main__":
 
     userSettings = {
-        "modelName": "nvidia/canary-180m-flash",
+        "modelName": "openai/whisper-large-v3",
         "language": "en",
         "onlyCpu": False,
 
