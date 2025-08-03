@@ -49,7 +49,7 @@ logging.basicConfig(level=logging.DEBUG,  # Set root logger level
                     format=logFormat,
                     datefmt=dateFormat,
                     filename=logFileName,
-                    filemode='a')  # Append mode
+                    filemode='w')  # Write mode
 # Console Handler (optional, but helpful for seeing logs directly in WSL console)
 consoleHandler = logging.StreamHandler(sys.stdout)
 consoleHandler.setFormatter(logging.Formatter(logFormat, datefmt=dateFormat))
@@ -68,31 +68,15 @@ logger = logging.getLogger(__name__)  # Get a logger for this module
 logger.info(f"--- WSL NeMo Server Script Started ---")
 logger.info(f"Logging configured. Level: DEBUG. Log file: {logFileName}")
 
-# --- NeMo Setup ---
-# Attempt NeMo import after basic setup and logging
-nemoAvailable = False  # Default to false
-ASRModel = None
-try:
-    logger.debug("Attempting NeMo import...")
-    from nemo.collections.asr.models import ASRModel
-
-    nemoAvailable = True
-    logger.info("NVIDIA NeMo toolkit found and imported successfully.")
-except ImportError:
-    logger.critical(
-        "NeMo toolkit not found. This server cannot function without model loading capability.")
-    logger.critical("Please install it in your WSL environment: pip install nemo_toolkit[asr]")
-    # Server can still run to respond to status, but load/transcribe will fail
-except Exception as e:
-    logger.critical(f"Unexpected error importing NeMo: {e}", exc_info=True)
-    # Server can still run
-
 app = Flask(__name__)
 
 
 # --- Global Server State ---
 class NemoServerModelHandler:
-    """Manages the NeMo ASR model lifecycle and transcription within the server."""
+    """
+    Manages the NeMo ASR model lifecycle and transcription within the server.
+    Delays NeMo import until loadModel is called.
+    """
 
     def __init__(self, targetModelName):
         # Store the name of the model we *intend* to load
@@ -102,6 +86,7 @@ class NemoServerModelHandler:
         self.loadInProgress = False  # Flag to prevent concurrent loads
         self.loadError = None  # Store last load error message
         self.device = None
+        # NOTE: NeMo is NOT imported here. Import happens in loadModel.
         self._determineDevice()
         logger.info(
             f"NemoServerModelHandler initialized for target model: {self.targetModelName} on device {self.device}")
@@ -135,7 +120,10 @@ class NemoServerModelHandler:
         logger.debug("CUDA memory cleaning attempt finished (NeMo Server).")
 
     def loadModel(self):
-        """Loads the NeMo ASR model. Returns True on success, False on failure."""
+        """
+        Imports NeMo and loads the ASR model.
+        Returns True on success, False on failure.
+        """
         # Prevent concurrent load attempts
         if self.loadInProgress:
             logger.warning("Load request ignored: Another load operation is already in progress.")
@@ -145,15 +133,31 @@ class NemoServerModelHandler:
         self.loadInProgress = True
         self.loadError = None  # Clear previous error
 
-        if not nemoAvailable:
-            errMsg = "Cannot load NeMo model - NeMo toolkit is not available (import failed)."
-            logger.error(errMsg)
+        # --- Import NeMo Here ---
+        ASRModel = None
+        try:
+            logger.info("Attempting NeMo import inside loadModel...")
+            from nemo.collections.asr.models import ASRModel
+            logger.info("NeMo imported successfully.")
+        except ImportError:
+            errMsg = "Cannot load NeMo model - NeMo toolkit not found or import failed during load request."
+            logger.critical(errMsg)
+            logger.critical(
+                "Please ensure 'nemo_toolkit[asr]' is installed in the WSL environment.")
             self.loadError = errMsg
             self.loadInProgress = False
             return False
+        except Exception as importE:
+            errMsg = f"Unexpected error importing NeMo during load request: {importE}"
+            logger.critical(errMsg, exc_info=True)
+            self.loadError = errMsg
+            self.loadInProgress = False
+            return False
+        # --- Proceed with load if import succeeded ---
         if self.modelLoaded:
-            logger.info(f"NeMo model '{self.targetModelName}' already loaded.")
-            self.loadInProgress = False  # Ensure flag is reset if called when loaded
+            logger.info(
+                f"NeMo model '{self.targetModelName}' already loaded (checked after import).")
+            self.loadInProgress = False  # Ensure flag is reset
             return True
 
         logger.info(f"Attempting to load NeMo model '{self.targetModelName}' to {self.device}...")
@@ -162,6 +166,7 @@ class NemoServerModelHandler:
         success = False
         try:
             logger.debug(f"Calling ASRModel.from_pretrained('{self.targetModelName}')...")
+            # Use the imported ASRModel class
             newModel = ASRModel.from_pretrained(self.targetModelName)
             logger.debug(f"Model loaded from pretrained, moving to device: {self.device}")
             newModel = newModel.to(self.device)
@@ -176,14 +181,14 @@ class NemoServerModelHandler:
             logger.info(
                 f"NeMo model '{self.targetModelName}' loaded successfully to {self.device} in {loadTime:.2f}s.")
 
-        except Exception as e:
-            errMsg = f"CRITICAL FAILURE loading NeMo model '{self.targetModelName}': {e}"
+        except Exception as loadE:
+            errMsg = f"CRITICAL FAILURE loading NeMo model '{self.targetModelName}': {loadE}"
             logger.error(errMsg, exc_info=True)
             logger.error(
                 "Check model name, internet connection (for download), NeMo installation, dependencies, and available memory (RAM/VRAM).")
             self.modelLoaded = False
             self.model = None
-            self.loadError = str(e)  # Store the error message
+            self.loadError = str(loadE)  # Store the error message
             self._cudaClean()
             success = False
         finally:
@@ -198,6 +203,7 @@ class NemoServerModelHandler:
         if not self.modelLoaded:
             logger.info("NeMo model already unloaded.")
             return True
+
         # Use targetModelName for logging consistency
         logger.info(f"Unloading NeMo model '{self.targetModelName}' from {self.device}...")
         unloadSuccess = False
@@ -243,13 +249,26 @@ class NemoServerModelHandler:
             except ValueError as e:
                 logger.error(f"Could not convert received bytes to float32 numpy array: {e}")
                 return None
+
             audioDurationSec = len(audioNp) / sampleRate if sampleRate > 0 else 0
             logger.info(
                 f"Received {len(audioDataBytes)} bytes ({len(audioNp)} samples, {audioDurationSec:.2f}s, Lang: {targetLang}) for transcription.")
-
             logger.debug(
                 f"Starting NeMo transcription (Lang: {targetLang}) on device {self.device}...")
             startTime = time.time()
+
+            # --- Ensure NeMo is imported if transcribe is called before load ---
+            # This is a safety check, normally loadModel should have been called first.
+            if 'ASRModel' not in locals() and 'ASRModel' not in globals():
+                logger.warning(
+                    "NeMo ASRModel not imported yet. Attempting import before transcription.")
+                try:
+                    from nemo.collections.asr.models import ASRModel
+                    logger.info("NeMo imported successfully during transcription request.")
+                except Exception as importE:
+                    logger.error(f"Failed to import NeMo during transcription request: {importE}")
+                    return None  # Cannot transcribe
+
             with torch.no_grad():
                 transcriptionKwargs = {
                     'audio': [audioNp],
@@ -262,8 +281,15 @@ class NemoServerModelHandler:
                     logger.debug(
                         f"Added target_lang='{targetLang}' and task='asr' for Canary model.")
                 elif targetLang:
+                    # Check if model supports inference kwargs before passing potentially unknown ones
+                    # For simplicity, we log a warning if language is provided but model isn't known multilingual
                     logger.warning(
                         f"Target language '{targetLang}' provided, but unsure if model '{self.targetModelName}' uses it. Not passing to transcribe().")
+
+                # Ensure self.model exists before calling transcribe
+                if self.model is None:
+                    logger.error("Transcription cannot proceed: self.model is None.")
+                    return None
 
                 transcriptionResults = self.model.transcribe(**transcriptionKwargs)
 
@@ -273,27 +299,32 @@ class NemoServerModelHandler:
             # Extract text from Hypothesis or other potential formats
             if transcriptionResults and isinstance(transcriptionResults, list):
                 firstResult = transcriptionResults[0]
+                # Handle NeMo's Hypothesis object or simple string
                 if hasattr(firstResult, 'text') and isinstance(firstResult.text, str):
                     transcriptionText = firstResult.text
                 elif isinstance(firstResult, str):
                     transcriptionText = firstResult
+                # Handle nested list case seen sometimes [[result]]
                 elif isinstance(firstResult, list) and firstResult and isinstance(firstResult[0],
                                                                                   str):
                     transcriptionText = firstResult[0]
                 else:
                     logger.warning(
-                        f"Unexpected result format: {type(firstResult)}. Full: {transcriptionResults}")
+                        f"Unexpected result format inside list: {type(firstResult)}. Full: {transcriptionResults}")
                     transcriptionText = ""
-            elif isinstance(transcriptionResults, str):
+            elif isinstance(transcriptionResults,
+                            str):  # Handle case where transcribe returns just a string
                 transcriptionText = transcriptionResults
             else:
                 logger.warning(
                     f"Empty or unexpected result format: {type(transcriptionResults)}. Full: {transcriptionResults}")
                 transcriptionText = ""
+
             transcriptionText = transcriptionText.strip() if transcriptionText else ""
         except Exception as e:
             logger.error(f"Error during NeMo transcription/processing: {e}", exc_info=True)
             transcriptionText = None
+
         return transcriptionText
 
 
@@ -481,10 +512,9 @@ def initialModelLoadTask(handler):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    if not nemoAvailable:
-        print("Exiting: NeMo toolkit is required but not available.", file=sys.stderr)
-        logger.critical("Exiting: NeMo toolkit is required but not available.")
-        exit(1)
+    # Removed the check for top-level nemoAvailable flag here,
+    # as import is now deferred to loadModel.
+    # The script will start Flask regardless, and loadModel will handle import errors later.
 
     parser = argparse.ArgumentParser(description="NeMo ASR Model Server for WSL")
     parser.add_argument("--model_name", type=str, required=True,
@@ -495,21 +525,27 @@ if __name__ == "__main__":
                         help="Port number to run the server on (default: 5001)")
     parser.add_argument("--load_on_start", action='store_true',
                         help="Attempt to load the model in the background after server starts")
+
     args = parser.parse_args()
 
     # Initialize the global handler (model is NOT loaded here)
     try:
         logger.info(f"Initializing NemoServerModelHandler for target model '{args.model_name}'...")
+        # nemoHandler is global
         nemoHandler = NemoServerModelHandler(args.model_name)
     except Exception as handlerInitE:
         logger.critical(f"Failed to initialize NemoServerModelHandler: {handlerInitE}",
                         exc_info=True)
+        # Use basic print as logging might not be fully flushed on critical exit
+        print(f"CRITICAL: Failed to initialize NemoServerModelHandler: {handlerInitE}",
+              file=sys.stderr)
         exit(1)
 
     # Start initial load in background thread *if* requested, *before* starting Flask app run
     loadThread = None  # Initialize thread variable
     if args.load_on_start:
         logger.info("Starting initial model load in background thread (--load_on_start)...")
+        # Pass the global nemoHandler to the task function
         loadThread = threading.Thread(target=initialModelLoadTask, args=(nemoHandler,),
                                       name="InitialModelLoader", daemon=True)
         loadThread.start()
