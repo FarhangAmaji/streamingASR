@@ -289,11 +289,16 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.lastActivityTime = time.time()
 
         self.audioBuffer = np.array([], dtype=np.float32)
+        self.actualSampleRate = self.sampleRate
+        self.maxBufferSize = int(
+            busyContinuousTime * 2 * self.actualSampleRate)  # to maintain context
         self.emptyTranscriptionCount = 0
         self.recordingStartTime = 0
         self.lastTranscriptionTime = 0
-        self.actualSampleRate = self.sampleRate
         self.actualChannels = self.channels
+        self.lastProcessedIndex = 0
+        self.silenceStartTime = None  # Tracks start of *current* silent stretch
+        self.lastSoundTime = 0  # Marks time of last detected sound
 
         self.lastValidTranscriptionTime = time.time()
 
@@ -443,41 +448,70 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 self.emptyTranscriptionCount = 0
 
     def transcribeAudio(self):
-        """Handle transcription according to the selected mode."""
         if not self.isRecordingActive or len(self.audioBuffer) == 0:
             return
 
-        currentTime = time.time()
+        now = time.time()
         audioData = None
 
         if self.transcriptionMode == "constantInterval":
-            if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval:
+            if (now - self.lastTranscriptionTime) >= self.transcriptionInterval:
                 audioData = self.audioBuffer.copy()
                 self.audioBuffer = np.array([], dtype=np.float32)
-                self.lastTranscriptionTime = currentTime
+                self.lastTranscriptionTime = now
 
         elif self.transcriptionMode == "busyContinuous":
-            requiredSamples = int(self.busyContinuousTime * self.actualSampleRate)
-            if len(self.audioBuffer) >= requiredSamples:
-                trailingChunk = self.audioBuffer[-requiredSamples:]
-                trailingMean = np.mean(np.abs(trailingChunk))  # ← use mean, not sum
-                if trailingMean < self.busyContinuousSilenceThreshold:  # ← new threshold
-                    audioData = self.audioBuffer.copy()
-                    self.audioBuffer = np.array([], dtype=np.float32)
-                    self.lastTranscriptionTime = currentTime
+            newAudio = self.audioBuffer[self.lastProcessedIndex:]
+
+            if len(newAudio) > int(0.1 * self.actualSampleRate):  # Process >100ms
+                frameSize = int(0.1 * self.actualSampleRate)
+                frames = [newAudio[i:i + frameSize] for i in range(0, len(newAudio), frameSize)]
+                rmsValues = [np.sqrt(np.mean(np.square(f))) if len(f) == frameSize else 0 for f in
+                             frames]
+
+                frameTime = 0
+                for i, rms in enumerate(rmsValues):
+                    frameTime = i * 0.1
+                    absoluteFrameTime = now - frameTime
+
+                    if rms >= self.busyContinuousSilenceThreshold:
+                        self.lastSoundTime = absoluteFrameTime
+                        self.silenceStartTime = None
+                    else:
+                        if self.silenceStartTime is None:
+                            self.silenceStartTime = absoluteFrameTime
+
+                        if absoluteFrameTime <= self.lastSoundTime + self.busyContinuousTime:
+                            continue
+
+                        finalFrameIdx = self.lastProcessedIndex + i * frameSize
+                        audioData = self.audioBuffer[:finalFrameIdx].copy()
+
+                        self.lastProcessedIndex = finalFrameIdx
+                        self.silenceStartTime = None
+                        self.lastTranscriptionTime = now
+                        break
+
+                if self.lastProcessedIndex < len(self.audioBuffer):
+                    self.audioBuffer = self.audioBuffer[self.lastProcessedIndex:]
+                self.lastProcessedIndex = 0
+
+                if len(self.audioBuffer) > self.maxBufferSize:
+                    self.audioBuffer = self.audioBuffer[-self.maxBufferSize:]
 
         if audioData is None:
             return
 
         segmentMean = np.mean(np.abs(audioData))
-        if segmentMean < self.lowLoudnessSkip_threshold:
+        segmentDuration = len(audioData) / self.actualSampleRate
+        if segmentMean < (self.lowLoudnessSkip_threshold * segmentDuration):
             transcription = ""
             self._debugPrint(f"lower than loudness threshold {segmentMean}")
         else:
             transcription = super().transcribeAudio(audioData, self.actualSampleRate)
 
         self.handleTranscriptionOutput(transcription, segmentMean)
-        self.lastActivityTime = currentTime
+        self.lastActivityTime = now  # ← Fixed: Use 'now', not 'currentTime'
 
     def handleTranscriptionOutput(self, transcription, loudnessValue):
         """Post-process transcription and manage silence time-out."""
@@ -491,7 +525,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
         cleaned = transcription.strip().lower()
         isEmpty = (cleaned == "") or (cleaned == ".")
         isFalseWord = cleaned in [w.lower() for w in self.commonFalseDetectedWords]
-        loudnessThresh = self.loudnessThresholdOfCommonFalseDetectedWords * effectiveInterval
+        loudnessThresh = self.loudnessThresholdOfCommonFalseDetectedWords
         isBelow = loudnessValue < loudnessThresh
         isFalseDetection = isFalseWord and isBelow
 
@@ -572,11 +606,12 @@ if __name__ == "__main__":
             modelName="openai/whisper-large-v3",
             transcriptionMode="busyContinuous",  # |constantInterval
             transcriptionInterval=4,  # Longer interval between transcriptions
-            busyContinuousTime=1.4,
-            commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
-            loudnessThresholdOf_commonFalseDetectedWords=20,
+            busyContinuousTime=6,
+            commonFalseDetectedWords=["you", "thank you", "bye", 'amen', "you"],
+            loudnessThresholdOf_commonFalseDetectedWords=32,  # ← Updated
             lowLoudnessSkip_threshold=0,
             playEnableSounds=False,
+            busyContinuousSilenceThreshold=3.5,  # ← Updated
             maxDuration_recording=10000,  # 10000s max recording
             maxDuration_programActive=2 * 60 * 60,  # 1 hour program active time
             model_unloadTimeout=20 * 60,  # time to Unload model from gpu
