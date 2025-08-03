@@ -1,7 +1,7 @@
 # useRealtimeTranscription.py
 # ccc1
 #  Check or to_do:
-#   1. remove certain text from transcription (|endoftext|)
+#   1. check the times are correct, not sure but felt that models unloads earlier than model_unloadTimeout
 #   2. Add ask AI later
 #   3. debugging modes (only if later, I require extensive debugging again)
 
@@ -85,7 +85,7 @@ userSettings = {
     "dictationMode_silenceDurationToOutput": 0.6,
     # (dictationMode only) Audio loudness level below which audio is considered 'silence'.
     # Adjust based on microphone sensitivity and background noise. Lower values detect quieter sounds as speech.
-    "dictationMode_silenceLoudnessThreshold": 0.0004,
+    "dictationMode_silenceLoudnessThreshold": 0.00015,
 
     # (constantIntervalMode only) Interval in seconds at which to trigger transcription, regardless of speech/silence.
     "constantIntervalMode_transcriptionInterval": 4.0,
@@ -113,9 +113,13 @@ userSettings = {
     # List of common words/phrases that might be hallucinated by the ASR model during near-silence.
     # These will be filtered out ONLY if the segment's average loudness is also below 'loudnessThresholdOf_commonFalseDetectedWords'.
     "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', 'thanks', 'okay', 'uh',
-                                 'um', 'hmm', '<|endoftext|>', ],
+                                 'um', 'hmm', ],
     # The loudness threshold used for filtering 'commonFalseDetectedWords'.
     "loudnessThresholdOf_commonFalseDetectedWords": 0.00045,
+
+    # List of words/phrases to *always* remove from the final transcription, regardless of loudness.
+    # Matching is case-insensitive. Extra spaces resulting from removal are cleaned up.
+    "bannedWords": ["<|endoftext|>", ],  # Add your words here
 
     # --- General Behavior ---
     # Remove trailing ellipsis (...) or periods (.) often added by ASR models.
