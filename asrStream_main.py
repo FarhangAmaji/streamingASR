@@ -16,6 +16,9 @@ import sounddevice as sd
 import soundfile as sf
 import torch
 from transformers import pipeline
+import platform  # For OS detection
+import subprocess  # For running clip.exe
+import shutil  # For finding clip.exe
 
 try:
     from nemo.collections.asr.models import ASRModel
@@ -45,6 +48,28 @@ def logWarning(message):
 def logError(message):
     """Helper function for error messages."""
     print(f"ERROR: {message}")
+
+
+_pyautoguiAvailable = False
+_pyautoguiErrorMessage = ""
+if platform.system() == "Windows":
+    try:
+        import pyautogui
+
+        _pyautoguiAvailable = True
+        logInfo("PyAutoGUI loaded successfully (for potential Windows native typing).")
+    except ImportError:
+        _pyautoguiErrorMessage = "PyAutoGUI library not found. Install it (`pip install pyautogui`) to enable typing output on Windows."
+        logWarning(_pyautoguiErrorMessage)
+    except Exception as e:
+        _pyautoguiErrorMessage = f"PyAutoGUI could not initialize a display connection on Windows: {e}. Typing output will be disabled."
+        logWarning(_pyautoguiErrorMessage)
+elif platform.system() == "Linux":
+    _pyautoguiAvailable = False  # Explicitly false on Linux for this logic
+    logInfo("Running on Linux (or WSL). PyAutoGUI typing will not be used for output.")
+else:
+    _pyautoguiAvailable = False  # Other OS
+    logInfo(f"Running on unknown OS: {platform.system()}. PyAutoGUI typing will not be used.")
 
 
 class AbstractAsrModelHandler(abc.ABC):
@@ -1030,13 +1055,58 @@ class TranscriptionOutputHandler:
 
 
 class SystemInteractionHandler:
-    """Manages interactions with keyboard for hotkeys and pygame for sound."""
+    """
+    Manages interactions with keyboard for hotkeys, pygame for sound,
+    and handles text output either via simulated typing (Windows native)
+    or Windows clipboard copy (WSL).
+    """
 
     def __init__(self, config):
         self.config = config
         self.audioFiles = {}
         self.isMixerInitialized = False
         self._setupAudioNotifications()
+
+        self.textOutputMethod = "none"  # Default to no output
+        self.clipExePath = None
+        self.canUsePyautogui = False  # Assume false initially
+        self.isWslEnvironment = False
+
+        outputEnabledByConfig = self.config.get('enableTypingOutput', True)  # Reuse setting name
+
+        osName = platform.system()
+        if osName == "Linux" and "WSL_DISTRO_NAME" in os.environ:
+            self.isWslEnvironment = True
+            logInfo("WSL environment detected.")
+        elif osName == "Windows":
+            logInfo("Windows Native environment detected.")
+        else:
+            logInfo(f"Non-Windows/Non-WSL environment detected ({osName}).")
+
+        if outputEnabledByConfig:
+            if osName == "Windows" and not self.isWslEnvironment:
+                if _pyautoguiAvailable:
+                    self.textOutputMethod = "pyautogui"
+                    self.canUsePyautogui = True
+                    logInfo("Text Output Method: PyAutoGUI (Windows Native Typing)")
+                else:
+                    logWarning(
+                        f"PyAutoGUI is unavailable on Windows ({_pyautoguiErrorMessage}). Text output disabled.")
+                    self.textOutputMethod = "none"
+            elif self.isWslEnvironment:
+                self.clipExePath = shutil.which('clip.exe')
+                if self.clipExePath:
+                    self.textOutputMethod = "clipboard"
+                    logInfo(f"Text Output Method: Windows Clipboard via '{self.clipExePath}' (WSL)")
+                else:
+                    logWarning("Text output disabled in WSL: 'clip.exe' not found in path.")
+                    self.textOutputMethod = "none"
+            else:
+                logInfo(f"Text output is not supported on this OS ({osName}) or configuration.")
+                self.textOutputMethod = "none"
+        else:
+            logInfo("Text output globally disabled by configuration ('enableTypingOutput': False).")
+            self.textOutputMethod = "none"
 
     def _logDebug(self, message):
         logDebug(message, self.config.get('debugPrint'))
@@ -1070,10 +1140,10 @@ class SystemInteractionHandler:
 
     def playNotification(self, soundName):
         """Plays a notification sound if available and audio notifications are globally enabled."""
-        if not self.config.get('enableAudioNotifications', False):  # Default to False if not set
+        if not self.config.get('enableAudioNotifications', False):
             self._logDebug(
                 f"Skipping sound '{soundName}' because enableAudioNotifications is False.")
-            return  # Exit early if all notifications are disabled
+            return
 
         if soundName in ['recordingOn', 'outputEnabled'] and not self.config.get('playEnableSounds',
                                                                                  False):
@@ -1109,23 +1179,23 @@ class SystemInteractionHandler:
             try:
                 if keyboard.is_pressed(recordingToggleKey):
                     self._logDebug(f"Hotkey '{recordingToggleKey}' pressed.")
-                    orchestrator.toggleRecording()  # Call orchestrator method
+                    orchestrator.toggleRecording()
                     self._waitForKeyRelease(recordingToggleKey)
 
                 if keyboard.is_pressed(outputToggleKey):
                     self._logDebug(f"Hotkey '{outputToggleKey}' pressed.")
-                    orchestrator.toggleOutput()  # Call orchestrator method
+                    orchestrator.toggleOutput()  # Toggles stateManager.outputEnabled
                     self._waitForKeyRelease(outputToggleKey)
 
             except ImportError:
                 logError("Keyboard library not installed or permission denied. Hotkeys disabled.")
                 logError("Try running with sudo (Linux/macOS) or installing 'keyboard'.")
-                break  # Stop monitoring if library fails
+                break
             except Exception as e:
                 logError(f"Error in keyboard monitoring thread: {e}")
-                time.sleep(1)  # Avoid busy-looping on repeated errors
+                time.sleep(1)
 
-            time.sleep(0.05)  # Prevent high CPU usage
+            time.sleep(0.05)
 
         logInfo("Keyboard shortcut monitor thread stopping.")
         orchestrator.stateManager.stopProgram()
@@ -1133,7 +1203,7 @@ class SystemInteractionHandler:
     def _waitForKeyRelease(self, key):
         """Waits until the specified key is released to prevent rapid toggling."""
         startTime = time.time()
-        timeout = 2.0  # Add a timeout to prevent getting stuck
+        timeout = 2.0
         while keyboard.is_pressed(key):
             if time.time() - startTime > timeout:
                 self._logDebug(f"Warning: Timeout waiting for key release '{key}'.")
@@ -1150,13 +1220,49 @@ class SystemInteractionHandler:
             return False
 
     def typeText(self, text):
-        """Uses pyautogui to simulate typing text."""
-        try:
-            pyautogui.write(text)
-        except NameError:
-            logError("PyAutoGUI library not found. Install it to enable typing output.")
-        except Exception as e:
-            logWarning(f"PyAutoGUI write failed: {e}")
+        """
+        Outputs text using the method determined during initialization
+        (PyAutoGUI typing on Windows native, clipboard copy on WSL).
+        """
+
+        if self.textOutputMethod == "pyautogui":
+            if self.canUsePyautogui:  # Double check flag set in init
+                try:
+                    pyautogui.write(text)
+                    self._logDebug(f"Typed text via PyAutoGUI: '{text[:50]}...'")
+                except Exception as e:
+                    logWarning(f"PyAutoGUI write failed during execution: {e}")
+            else:
+                self._logDebug("Typing skipped: PyAutoGUI method selected but unavailable.")
+
+        elif self.textOutputMethod == "clipboard":
+            if self.clipExePath:  # Double check path is valid
+                try:
+                    process = subprocess.run(
+                        [self.clipExePath],
+                        input=text,
+                        encoding='utf-8',  # Ensure correct encoding for clipboard
+                        check=True,  # Raise error on failure
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    self._logDebug(f"Copied text to Windows clipboard: '{text[:50]}...'")
+                except FileNotFoundError:
+                    logError(
+                        f"Error copying to clipboard: '{self.clipExePath}' not found during execution.")
+                    self.clipExePath = None  # Mark as unavailable
+                    self.textOutputMethod = "none"
+                except subprocess.CalledProcessError as e:
+                    logError(f"Error running clip.exe: {e}")
+                    logError(f"clip.exe stderr: {e.stderr.decode('utf-8', errors='ignore')}")
+                except Exception as e:
+                    logError(f"Unexpected error copying text to clipboard: {e}")
+            else:
+                self._logDebug(
+                    "Clipboard copy skipped: Clipboard method selected but clip.exe unavailable.")
+
+        elif self.textOutputMethod == "none":
+            pass
 
     def cleanup(self):
         """Cleans up system interaction resources (pygame mixer)."""
@@ -1666,7 +1772,7 @@ class SpeechToTextOrchestrator:
 if __name__ == "__main__":
 
     userSettings = {
-        "modelName": "nvidia/canary-180m-flash",
+        "modelName": "openai/whisper-large-v3",
         "language": "en",
         "onlyCpu": False,
 
