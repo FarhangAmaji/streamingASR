@@ -308,11 +308,9 @@ class RealTimeAudioProcessor:
         self.audioBuffer = np.array([], dtype=np.float32)
         # Timestamp for constant interval mode trigger logic
         self.lastTranscriptionTriggerTime = time.time()
-
         # --- Dictation mode specific state ---
         self.isCurrentlySpeaking = False  # Flag if audio is currently above silence threshold
         self.silenceStartTime = None  # Timestamp when silence started *after* speech
-
         logDebug("RealTimeAudioProcessor initialized.")
 
     def _calculateChunkLoudness(self, audioChunk: np.ndarray) -> float:
@@ -327,12 +325,11 @@ class RealTimeAudioProcessor:
                 min_val = np.iinfo(audioChunk.dtype).min
                 if max_val > min_val:
                     audioChunk = (audioChunk.astype(np.float32) - min_val) / (
-                                max_val - min_val) * 2.0 - 1.0
+                            max_val - min_val) * 2.0 - 1.0
                 else:
                     audioChunk = audioChunk.astype(np.float32)
             else:
                 audioChunk = audioChunk.astype(np.float32)  # Just cast other types
-
         # Use Root Mean Square (RMS) for a better loudness measure? Optional.
         # rms = np.sqrt(np.mean(audioChunk**2))
         # return rms
@@ -343,29 +340,27 @@ class RealTimeAudioProcessor:
         """
         Processes a new raw audio chunk: converts to float32, ensures mono,
         updates internal state (like dictation mode), and appends to the buffer.
-
         Args:
             audioChunk (np.ndarray): Raw audio data chunk from AudioHandler.
-
         Returns:
             bool: True if the chunk was successfully processed and added to the buffer, False otherwise.
         """
         if audioChunk is None or audioChunk.size == 0:
-            logDebug("processIncomingChunk received empty chunk, skipping.")
+            # logDebug("processIncomingChunk received empty chunk, skipping.") # Can be noisy
             return False  # No chunk processed
 
         processedChunk = audioChunk  # Start with the input chunk
 
         # --- Ensure Float32 Audio ---
         if processedChunk.dtype != np.float32:
-            logDebug(f"Chunk received with dtype {processedChunk.dtype}, converting to float32.")
+            # logDebug(f"Chunk received with dtype {processedChunk.dtype}, converting to float32.") # Can be noisy
             try:
                 if processedChunk.dtype.kind in ('i', 'u'):
                     max_val = np.iinfo(processedChunk.dtype).max
                     min_val = np.iinfo(processedChunk.dtype).min
                     if max_val > min_val:
                         processedChunk = (processedChunk.astype(np.float32) - min_val) / (
-                                    max_val - min_val) * 2.0 - 1.0
+                                max_val - min_val) * 2.0 - 1.0
                     else:
                         processedChunk = processedChunk.astype(np.float32)
                 else:
@@ -378,18 +373,17 @@ class RealTimeAudioProcessor:
         numChannels = self.config.get('actualChannels', 1)
         if numChannels > 1:
             if len(processedChunk.shape) > 1 and processedChunk.shape[1] == numChannels:
-                logDebug(f"Averaging {numChannels} channels to mono.")
+                # logDebug(f"Averaging {numChannels} channels to mono.") # Can be noisy
                 processedChunk = np.mean(processedChunk, axis=1)
             elif len(processedChunk.shape) == 1 and numChannels > 1:
                 logWarning(
                     f"Received 1D audio data but expected {numChannels} channels. Proceeding as mono.")
 
-        # --- *** NEW: Ensure processedChunk is 1D before concatenation *** ---
+        # --- Ensure processedChunk is 1D before concatenation ---
         if processedChunk.ndim > 1:
             # Example: Flatten a potential (N, 1) shape to (N,)
-            logDebug(f"Flattening processed chunk from {processedChunk.shape} to 1D.")
+            # logDebug(f"Flattening processed chunk from {processedChunk.shape} to 1D.") # COMMENTED OUT - TOO NOISY
             processedChunk = processedChunk.flatten()
-        # --- *** End of Change *** ---
 
         # Ensure chunk is not empty after processing
         if processedChunk is None or processedChunk.size == 0:
@@ -421,7 +415,6 @@ class RealTimeAudioProcessor:
         # Use a configurable threshold for detecting 'silence' within dictation mode
         silenceThreshold = self.config.get('dictationMode_silenceLoudnessThreshold',
                                            0.001)  # Example default
-
         if chunkLoudness >= silenceThreshold:
             # Audio is above threshold - considered speaking
             if not self.isCurrentlySpeaking:
@@ -446,7 +439,6 @@ class RealTimeAudioProcessor:
         """
         Checks if conditions are met to trigger transcription based on the current mode
         and the accumulated audio buffer.
-
         Returns:
             numpy.ndarray | None: A copy of the audio data segment (Transcription Window)
                                    to be transcribed if trigger conditions are met.
@@ -454,7 +446,6 @@ class RealTimeAudioProcessor:
         """
         mode = self.config.get('transcriptionMode')
         audioDataToTranscribe = None
-
         # --- Route to mode-specific trigger logic ---
         if mode == "constantIntervalMode":
             audioDataToTranscribe = self._checkTriggerConstantInterval()
@@ -464,7 +455,6 @@ class RealTimeAudioProcessor:
             logWarning(
                 f"Unsupported transcriptionMode: {mode}. No transcription will be triggered.")
             return None  # Unknown mode
-
         # --- Process Trigger Result ---
         if audioDataToTranscribe is not None:
             # Ensure we have substantial audio data (avoid tiny fragments unless intended)
@@ -473,12 +463,10 @@ class RealTimeAudioProcessor:
             if audioDataToTranscribe.size == 0:
                 logDebug("Trigger occurred but yielded empty audio data. Ignoring.")
                 return None
-
             logInfo(
                 f"Triggering transcription ({mode}). Buffer duration: {len(audioDataToTranscribe) / self.config.get('actualSampleRate', 1):.2f}s.")
             # Mark activity when preparing data for ASR
             if self.stateManager: self.stateManager.updateLastActivityTime()
-
             # Clear buffer / reset state specific to the mode *after* getting data
             if mode == "constantIntervalMode":
                 self.clearBuffer()  # Clear entire buffer
@@ -486,7 +474,6 @@ class RealTimeAudioProcessor:
             elif mode == "dictationMode":
                 # Buffer and state reset happens inside _checkTriggerDictationMode
                 pass
-
             return audioDataToTranscribe  # Return the data segment
         else:
             # No trigger condition met for the current mode
@@ -494,7 +481,6 @@ class RealTimeAudioProcessor:
             if mode == "constantIntervalMode" and self._isConstantIntervalTimeReached():
                 self.lastTranscriptionTriggerTime = time.time()
                 # logDebug("Constant interval reached, buffer empty. Resetting timer.") # Can be noisy
-
         return None  # No trigger
 
     def _isConstantIntervalTimeReached(self) -> bool:
@@ -522,9 +508,7 @@ class RealTimeAudioProcessor:
             requiredSilence = self.config.get('dictationMode_silenceDurationToOutput',
                                               0.6)  # Default 0.6s
             if requiredSilence <= 0: return None  # Feature disabled
-
             elapsedSilence = time.time() - self.silenceStartTime
-
             if elapsedSilence >= requiredSilence:
                 # Silence duration met! Trigger transcription.
                 logDebug(
@@ -570,7 +554,6 @@ class RealTimeAudioProcessor:
             duration = bufferLen / sampleRate if sampleRate > 0 else 0
             logDebug(f"Clearing audio buffer with {bufferLen} samples ({duration:.2f}s).")
         self.audioBuffer = np.array([], dtype=np.float32)  # Reset to empty float32 array
-
         # Also reset dictation state when buffer is explicitly cleared
         # This prevents stale state if cleared manually or due to output disable
         if self.isCurrentlySpeaking or self.silenceStartTime is not None:
