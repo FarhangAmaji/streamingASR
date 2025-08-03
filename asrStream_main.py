@@ -232,6 +232,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
                  transcriptionInterval=3,
                  busyContinuousTime=0.6,
                  transcriptionMode="constantInterval",
+                 skipSilence_afterNSecSilence=0.3,  # Add the argument here
                  maxDuration_recording=10000,
                  maxDuration_programActive=60 * 60,
                  model_unloadTimeout=5 * 60,
@@ -260,6 +261,12 @@ class SpeechToTextTranscriber(BaseTranscriber):
             busyContinuousTime (float): Duration of silence required after speech to trigger
                                         transcription (busyContinuous mode).
             transcriptionMode (str): "constantInterval" or "busyContinuous".
+            skipSilence_afterNSecSilence (float): If a transcription segment's overall loudness
+                                                         is below 'lowLoudnessSkip_threshold', only skip it
+                                                         if the average loudness of the *last* N seconds
+                                                         (this value) was also below
+                                                         'busyContinuousSilenceThreshold'. Set to 0 to disable
+                                                         this trailing check and revert to only checking overall loudness.
             maxDuration_recording (int): Maximum duration for a single recording session (seconds).
             maxDuration_programActive (int): Maximum duration for program activity (seconds).
             model_unloadTimeout (int): Timeout for unloading model when inactive (seconds).
@@ -269,9 +276,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
             outputEnabled (bool): Initial output state (typing transcription).
             sampleRate (int): Audio sample rate (Hz).
             lowLoudnessSkip_threshold (float): Average loudness threshold below which transcription
-                                                of a segment is skipped.
+                                                of a segment is potentially skipped (see above).
             busyContinuousSilenceThreshold (float): Average loudness threshold below which an incoming
-                                                    audio chunk is considered silent (busyContinuous mode).
+                                                    audio chunk is considered silent (busyContinuous mode),
+                                                    AND used for the trailing check of the low loudness skip feature.
             channels (int): Number of audio channels (1 for mono, 2 for stereo).
             removeTrailingDots (bool): Whether to remove trailing dots from transcriptions.
             language (str): Language code for transcription (e.g., "en", "es").
@@ -290,6 +298,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         self.transcriptionMode = transcriptionMode
         self.busyContinuousTime = busyContinuousTime
+        self.skipLowLoudness_afterNSecLowLoudness = skipSilence_afterNSecSilence
 
         self.sampleRate = sampleRate
         self.channels = channels
@@ -320,7 +329,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
             pygame.mixer.init()
         except pygame.error as e:
             print(f"Warning: Failed to initialize pygame mixer: {e}. Notification sounds disabled.")
-            self.audioFiles = {}  # Clear the dict so playNotification does nothing
+            self.audioFiles = {}
 
         self.recordingToggleKey = recordingToggleKey
         self.outputToggleKey = outputToggleKey
@@ -332,19 +341,19 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.isRecordingActive = isRecordingActive
         self.isProgramActive = isProgramActive
         self.outputEnabled = outputEnabled
-        self.lastActivityTime = time.time()  # Used for model unloading timeout
+        self.lastActivityTime = time.time()
 
-        self.audioBuffer = np.array([], dtype=np.float32)  # Main buffer for accumulating audio
-        self.emptyTranscriptionCount = 0  # Used previously, might be redundant now
-        self.recordingStartTime = 0  # Timestamp when current recording session started
-        self.lastTranscriptionTime = 0  # Timestamp of the last transcription event
-        self.actualSampleRate = self.sampleRate  # Will be updated in setupDeviceInfo
-        self.actualChannels = self.channels  # Will be updated in setupDeviceInfo
+        self.audioBuffer = np.array([], dtype=np.float32)
+        self.emptyTranscriptionCount = 0
+        self.recordingStartTime = 0
+        self.lastTranscriptionTime = 0
+        self.actualSampleRate = self.sampleRate
+        self.actualChannels = self.channels
 
         self.lastValidTranscriptionTime = time.time()
 
-        self.currently_speaking = False  # Flag: Is speech currently being detected?
-        self.silence_start_time = None  # Timestamp: When did silence start after speech ended?
+        self.currently_speaking = False
+        self.silence_start_time = None
 
         print("--- Available Audio Devices ---")
         try:
