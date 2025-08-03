@@ -682,30 +682,39 @@ class TranscriptionOutputHandler:
 
     def _filterAndFormatTranscription(self, transcription, segmentLoudness, audioData):
         """
-        Applies filtering rules (silence, false positives) and formatting.
+        Applies filtering rules (silence, false positives) and formatting to the raw transcription.
 
         Returns:
             tuple[bool, str]: (shouldOutput, formattedText)
+                               - shouldOutput: True if the text should be outputted, False otherwise.
+                               - formattedText: The final, cleaned text ready for output, or empty string.
         """
         cleanedText = transcription.strip() if isinstance(transcription, str) else ""
         if not cleanedText or cleanedText == ".":
-            self._logDebug("Transcription is empty or just a dot.")
-            return False, ""
+            self._logDebug("Transcription is effectively empty after initial strip.")
+            return False, ""  # Do not output empty or solely dot results.
+
+        lowerCleanedText = cleanedText.lower()
 
         if self._shouldSkipTranscriptionDueToSilence(segmentLoudness, audioData):
             self._logDebug(
                 f"Post-ASR check indicates segment should have been skipped due to silence. Discarding result: '{cleanedText}'")
-            return False, ""
+            return False, ""  # Do not output if determined to be silence.
 
-        if self._isFalsePositive(cleanedText, segmentLoudness):
-            self._logDebug(
-                f"Filtering false positive word '{cleanedText}' due to low loudness ({segmentLoudness:.6f}).")
-            return False, ""
+        if self._isFalsePositive(lowerCleanedText, segmentLoudness):
+            return False, ""  # Do not output if filtered as a false positive.
 
-        formattedText = cleanedText.lstrip(" ")  # Remove leading space for typing
+        formattedText = cleanedText
         if self.config.get('removeTrailingDots'):
-            formattedText = formattedText.rstrip('. ')  # Remove trailing dots/spaces
+            formattedText = formattedText.rstrip('. ')
 
+        formattedText = formattedText.lstrip(" ")
+
+        if not formattedText:
+            self._logDebug("Text became empty after final formatting steps.")
+            return False, ""
+
+        self._logDebug(f"Final formatted text ready for output: '{formattedText}'")
         return True, formattedText
 
     def _shouldSkipTranscriptionDueToSilence(self, segmentMeanLoudness, audioData):
@@ -749,20 +758,36 @@ class TranscriptionOutputHandler:
         else:
             return False  # Don't skip
 
-    def _isFalsePositive(self, cleanedLowerCaseText, segmentLoudness):
-        """Checks if the transcription is a common false word detected in low loudness."""
+    def _isFalsePositive(self, lowerCleanedText, segmentLoudness):
+        """
+        Checks if the transcription is a common false word detected in low loudness.
+        Cleans the input text further (removing punctuation) for more robust matching.
+        """
         commonFalseWords = self.config.get('commonFalseDetectedWords', [])
         if not commonFalseWords:
-            return False  # No words to filter
+            return False
 
-        lowerText = cleanedLowerCaseText.lower()
+        import string
+
+        translator = str.maketrans('', '', string.punctuation)
+        checkText = lowerCleanedText.translate(translator).strip()
+        checkText = ' '.join(checkText.split())
+        self._logDebug(
+            f"Checking false positive for cleaned text: '{checkText}' (from original lower: '{lowerCleanedText}')")
+
         normalizedFalseWords = [w.lower() for w in commonFalseWords]
 
-        if lowerText in normalizedFalseWords:
+        if checkText in normalizedFalseWords:
             loudnessThreshold = self.config.get('loudnessThresholdOf_commonFalseDetectedWords',
                                                 0.0008)
             if segmentLoudness < loudnessThreshold:
-                return True  # Is a false positive based on word and loudness
+                self._logDebug(
+                    f"'{checkText}' IS considered a false positive (Loudness {segmentLoudness:.6f} < {loudnessThreshold:.6f}). Filtering.")
+                return True
+            else:
+                self._logDebug(
+                    f"'{checkText}' matches a false positive word BUT loudness ({segmentLoudness:.6f}) >= threshold ({loudnessThreshold:.6f}). Not filtering.")
+
         return False
 
     def _handleValidOutput(self, finalText):
@@ -820,13 +845,15 @@ class SystemInteractionHandler:
             self.isMixerInitialized = False
 
     def playNotification(self, soundName):
-        """Plays a notification sound if available and enabled."""
-        if not self.isMixerInitialized or soundName not in self.audioFiles:
-            return
+        """Plays a notification sound if available and audio notifications are globally enabled."""
+        if not self.config.get('enableAudioNotifications', False):  # Default to False if not set
+            self._logDebug(
+                f"Skipping sound '{soundName}' because enableAudioNotifications is False.")
+            return  # Exit early if all notifications are disabled
 
-        enablingSounds = {"outputEnabled", "recordingOn"}
-        if not self.config.get('playEnableSounds') and soundName in enablingSounds:
-            self._logDebug(f"Skipping enabling sound: {soundName}")
+        if not self.isMixerInitialized or soundName not in self.audioFiles:
+            self._logDebug(
+                f"Cannot play sound '{soundName}'. Mixer initialized: {self.isMixerInitialized}, Sound exists: {soundName in self.audioFiles}")
             return
 
         soundPath = self.audioFiles[soundName]
