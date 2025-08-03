@@ -1,12 +1,13 @@
 import logging
 import queue
 import threading
-import time
 
 import keyboard
+import math
 import numpy as np
 import pyautogui
 import sounddevice as sd
+import time
 import torch
 from transformers import pipeline
 
@@ -23,6 +24,7 @@ channels = 1  # Mono
 blockSize = 1024  # Number of frames per block
 transcriptionInterval = 5  # Seconds to accumulate audio before transcription
 maxDuration = 60  # Maximum recording duration in seconds (optional)
+consecutiveIdleTime = 28  # Maximum consecutive seconds of silence before stopping
 
 # Queue to store audio chunks
 audioQueue = queue.Queue()
@@ -61,7 +63,7 @@ asr({"raw": dummyAudio, "sampling_rate": sampleRate})  # Corrected for API
 def processAudio(deviceId=None, maxDuration=maxDuration):
     """
     Continuously record audio, transcribe it, and type the transcription.
-    Stops when 'q' is pressed or after maxDuration seconds.
+    Stops when 'q' is pressed or after maxDuration seconds or after consecutive idle time.
     """
     global isRecordingActive
     try:
@@ -77,6 +79,7 @@ def processAudio(deviceId=None, maxDuration=maxDuration):
 
         print(f"Recording with sample rate {actualSampleRate} Hz, channels {actualChannels}...")
         print(f"Press 'q' to stop recording, or recording will stop after {maxDuration} seconds.")
+        print(f"Recording will also stop after {consecutiveIdleTime} seconds of silence.")
 
         # Start stop key listener in a separate thread
         stopThread = threading.Thread(target=stopRecording)
@@ -85,6 +88,10 @@ def processAudio(deviceId=None, maxDuration=maxDuration):
 
         # Initialize audio buffer
         audioBuffer = np.array([], dtype=np.float32)
+
+        # Track empty transcriptions
+        emptyTranscriptionCount = 0
+        maxEmptyTranscriptions = math.ceil(consecutiveIdleTime / transcriptionInterval)
 
         # Start audio stream
         with sd.InputStream(samplerate=actualSampleRate,
@@ -123,8 +130,32 @@ def processAudio(deviceId=None, maxDuration=maxDuration):
 
                             # Simply write the text with a space at the end (no Enter key)
                             # This prevents newlines and subsequent indentation
-                            cleaned_text = transcription.strip()
-                            pyautogui.write(cleaned_text + " ")
+                            cleanedText = transcription.strip()
+                            pyautogui.write(cleanedText + " ")
+
+                            # Reset consecutive empty transcription count
+                            emptyTranscriptionCount = 0
+                        else:
+                            # IMPORTANT: This handles the consecutiveIdleTime logic
+                            # Single words like "you" or common phrases like "Thank you" when alone
+                            # are likely false positives from background noise
+                            # If we get multiple consecutive empty/minimal transcriptions,
+                            # we'll stop recording after reaching maxEmptyTranscriptions
+                            # (calculated as ceil(consecutiveIdleTime/transcriptionInterval))
+
+                            # Consider also checking word count or implementing energy threshold here
+                            # to better distinguish between silence and actual speech
+
+                            # Increment empty transcription count
+                            emptyTranscriptionCount += 1
+                            print(
+                                f"Empty transcription detected ({emptyTranscriptionCount}/{maxEmptyTranscriptions})")
+
+                            # Check if we've reached the maximum consecutive empty transcriptions
+                            if emptyTranscriptionCount >= maxEmptyTranscriptions:
+                                print(f"Stopping after {consecutiveIdleTime} seconds of silence")
+                                isRecordingActive = False
+                                break
                     except Exception as e:
                         print(f"Error during transcription: {e}")
 
@@ -147,5 +178,4 @@ def processAudio(deviceId=None, maxDuration=maxDuration):
 
 if __name__ == "__main__":
     # Replace with the correct device ID or use None for default
-    # processAudio(deviceId=0, maxDuration=5)  # e.g., deviceId=1
-    processAudio(deviceId=None, maxDuration=60)
+    processAudio(deviceId=None, maxDuration=460)
