@@ -575,7 +575,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
             if self.currently_speaking and self.silence_start_time is not None:
                 elapsed_silence = currentTime - self.silence_start_time
                 if self.debugPrint and elapsed_silence < self.busyContinuousTime:
-                    pass
+                    pass  # Optional debug for silence timer progress
 
                 if elapsed_silence >= self.busyContinuousTime:
                     if self.debugPrint:
@@ -585,7 +585,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
                     if len(self.audioBuffer) > 0:
                         audioData = self.audioBuffer.copy()
                         self.audioBuffer = np.array([], dtype=np.float32)
-                        self.lastTranscriptionTime = currentTime  # Mark time for potential future use
+                        self.lastTranscriptionTime = currentTime
                         perform_transcription = True
 
                         self.currently_speaking = False
@@ -600,7 +600,7 @@ class SpeechToTextTranscriber(BaseTranscriber):
                         self.currently_speaking = False
                         self.silence_start_time = None
 
-        if perform_transcription and audioData is not None:
+        if perform_transcription and audioData is not None and len(audioData) > 0:
             segment_duration = len(audioData) / self.actualSampleRate
             if self.debugPrint:
                 print(f"DEBUG: Processing segment of duration {segment_duration:.2f}s")
@@ -609,22 +609,58 @@ class SpeechToTextTranscriber(BaseTranscriber):
             if self.debugPrint:
                 print(f"DEBUG: Segment mean loudness = {segmentMean:.4f}")
 
+            perform_asr = True  # Assume we will transcribe unless skip conditions met
             if segmentMean < self.lowLoudnessSkip_threshold:
-                transcription = ""  # Treat as empty transcription
-                if self.debugPrint:
-                    print(
-                        f"DEBUG: Segment mean loudness ({segmentMean:.4f}) < lowLoudnessSkip_threshold ({self.lowLoudnessSkip_threshold}). Skipping transcription.")
-            else:
-                if self.debugPrint:
+
+                trailing_samples = 0
+                if self.skipLowLoudness_afterNSecLowLoudness > 0:
+                    trailing_samples = int(
+                        self.skipLowLoudness_afterNSecLowLoudness * self.actualSampleRate)
+
+                if trailing_samples > 0 and len(audioData) >= trailing_samples:
+                    trailing_audio = audioData[-trailing_samples:]
+                    trailing_loudness = np.mean(np.abs(trailing_audio))
+
+                    if trailing_loudness >= self.busyContinuousSilenceThreshold:
+                        perform_asr = True  # Override the skip decision
+                        if self.debugPrint:
+                            print(
+                                f"DEBUG: Overriding low loudness skip: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}) "
+                                f"but trailing {self.skipLowLoudness_afterNSecLowLoudness}s loudness ({trailing_loudness:.4f}) >= busyContinuousSilenceThreshold ({self.busyContinuousSilenceThreshold})")
+                    else:
+                        perform_asr = False
+                        if self.debugPrint:
+                            print(
+                                f"DEBUG: Low loudness skip CONFIRMED: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}) "
+                                f"AND trailing {self.skipLowLoudness_afterNSecLowLoudness}s loudness ({trailing_loudness:.4f}) < busyContinuousSilenceThreshold ({self.busyContinuousSilenceThreshold})")
+                else:
+                    perform_asr = False
+                    if self.debugPrint:
+                        print(
+                            f"DEBUG: Low loudness skip: segmentMean ({segmentMean:.4f} < {self.lowLoudnessSkip_threshold}). "
+                            f"Segment shorter than {self.skipLowLoudness_afterNSecLowLoudness}s or trailing check disabled.")
+
+            if perform_asr:
+                if self.debugPrint and not (segmentMean < self.lowLoudnessSkip_threshold):
                     print(
                         f"DEBUG: Segment mean loudness ({segmentMean:.4f}) >= lowLoudnessSkip_threshold. Proceeding to ASR.")
+                elif self.debugPrint and (segmentMean < self.lowLoudnessSkip_threshold):
+                    print(
+                        f"DEBUG: Proceeding to ASR despite low segment mean due to louder trailing audio.")
 
                 transcription = super().transcribeAudio(audioData, self.actualSampleRate)
+            else:
+                transcription = ""  # Treat as empty transcription
+                if self.debugPrint:
+                    print("DEBUG: Skipping transcription due to low loudness conditions.")
 
-            self.handleTranscriptionOutput(transcription,
-                                           segmentMean)  # Pass segment loudness for filtering
+            self.handleTranscriptionOutput(transcription, segmentMean)
 
             self.lastActivityTime = currentTime
+        elif perform_transcription and (audioData is None or len(audioData) == 0):
+            if self.debugPrint:
+                print(
+                    "DEBUG: Transcription triggered but audioData is None or empty. Skipping output handling.")
 
     def handleTranscriptionOutput(self, transcription, loudnessValue):
         """Post-process transcription and manage silence time-out."""
@@ -719,7 +755,7 @@ if __name__ == "__main__":
             modelName="openai/whisper-large-v3",
             transcriptionMode="busyContinuous",
             transcriptionInterval=4,  # Still relevant for constantInterval mode timing
-            busyContinuousTime=5.8,  # Still relevant for busyContinuous mode timing
+            busyContinuousTime=.8,  # Still relevant for busyContinuous mode timing
             commonFalseDetectedWords=["you", "thank you", "bye", 'amen'],
             loudnessThresholdOf_commonFalseDetectedWords=3.0,
             lowLoudnessSkip_threshold=0.0002,
