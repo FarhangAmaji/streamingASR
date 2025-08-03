@@ -52,18 +52,15 @@ class BaseTranscriber:
         if not self.modelLoaded:
             self._debugPrint("Loading model to GPU...")
 
-            # Force garbage collection before loading
             self._monitorMemory()
             self._cudaClean()
 
-            # Load the model with specific configuration
             self.asr = pipeline("automatic-speech-recognition",
                                 model=self.modelName,
                                 generate_kwargs={"language": self.language},
                                 device=self.device)
             self.modelLoaded = True
 
-            # Warm up the model
             dummyAudio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
             self.asr({"raw": dummyAudio, "sampling_rate": 16000})
 
@@ -74,7 +71,6 @@ class BaseTranscriber:
         if self.modelLoaded:
             self._debugPrint("Unloading model from GPU...")
 
-            # Delete the model and pipeline
             del self.asr
             self.asr = None
 
@@ -85,14 +81,11 @@ class BaseTranscriber:
 
     def _cudaClean(self):
         """Clean CUDA memory."""
-        # Force garbage collection
         gc.collect()
-        # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
 
-            # Additional forceful memory cleanup
             with torch.no_grad():
                 torch.cuda.synchronize()
 
@@ -117,15 +110,12 @@ class BaseTranscriber:
         if not self.modelLoaded:
             self.loadModel()
 
-        # Convert to mono if stereo
         if len(audioData.shape) > 1:
             audioData = np.mean(audioData, axis=1)
 
-        # Transcribe
         result = self.asr({"raw": audioData, "sampling_rate": sampleRate})
         transcription = result["text"]
 
-        # Clean transcription
         if self.removeTrailingDots:
             transcription = transcription.rstrip('.')
 
@@ -174,13 +164,10 @@ class FileTranscriber(BaseTranscriber):
             str: Transcribed text, or None if transcription fails
         """
         try:
-            # Read audio file
             audioData, sampleRate = sf.read(audioFilePath)
 
-            # Transcribe using base class method
             transcription = self.transcribeAudio(audioData, sampleRate)
 
-            # Handle output
             if outputFilePath:
                 with open(outputFilePath, 'w', encoding='utf-8') as outputFile:
                     outputFile.write(transcription)
@@ -264,7 +251,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.transcriptionMode = transcriptionMode  # "constantInterval" | "busyContinuous"
         self.busyContinuousTime = busyContinuousTime  # seconds to look-back for silence
 
-        # Audio recording parameters
         self.sampleRate = sampleRate
         self.channels = channels
         self.blockSize = 1024  # Number of frames per block
@@ -276,11 +262,9 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.lowLoudnessSkip_threshold = lowLoudnessSkip_threshold
         self.busyContinuousSilenceThreshold = busyContinuousSilenceThreshold
 
-        # Parameters for false word detection handling
         self.commonFalseDetectedWords = commonFalseDetectedWords if commonFalseDetectedWords else []
         self.loudnessThresholdOfCommonFalseDetectedWords = loudnessThresholdOf_commonFalseDetectedWords
 
-        # Audio notifications setup
         self.scriptDir = Path(os.path.dirname(os.path.abspath(__file__)))
         self.audioFiles = {
             "modelUnloaded": str(self.scriptDir / "modelUnloaded.mp3"),
@@ -295,19 +279,15 @@ class SpeechToTextTranscriber(BaseTranscriber):
         self.playEnableSounds = playEnableSounds
         self.enablingSounds = {"outputEnabled", "recordingOn"}
 
-        # Initialize pygame for audio playback
         pygame.mixer.init()
 
-        # Queue to store audio chunks
         self.audioQueue = queue.Queue()
 
-        # Flags to control recording and output
         self.isRecordingActive = isRecordingActive
         self.isProgramActive = isProgramActive
         self.outputEnabled = outputEnabled
         self.lastActivityTime = time.time()
 
-        # Runtime variables
         self.audioBuffer = np.array([], dtype=np.float32)
         self.emptyTranscriptionCount = 0
         self.recordingStartTime = 0
@@ -317,7 +297,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         self.lastValidTranscriptionTime = time.time()
 
-        # List available audio devices
         print("Available audio devices:")
         devices = sd.query_devices()
         print(devices)
@@ -352,7 +331,8 @@ class SpeechToTextTranscriber(BaseTranscriber):
         """Start recording when recordingToggleKey is pressed."""
         self.isRecordingActive = True
         self.lastActivityTime = time.time()
-        self.lastValidTranscriptionTime = time.time()  # ← reset silence timer
+        self.recordingStartTime = 0  # <-- Optional: reset session timer
+        self.lastValidTranscriptionTime = time.time()  # ✅ Reset silence timer
         if not self.modelLoaded:  # ensure model is ready
             self.loadModel()
         print("Recording started...")
@@ -369,29 +349,19 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
         while self.isProgramActive and (time.time() - startTime) < self.maxDurationProgramActive:
             if keyboard.is_pressed(self.recordingToggleKey):
-                # Toggle recording state
                 self.isRecordingActive = not self.isRecordingActive
 
                 if self.isRecordingActive:
-                    print("Recording started...")
-                    self.playNotification("recordingOn")
-                    # Reset the program timer when recording starts
-                    startTime = time.time()
-                    self.lastActivityTime = time.time()
-                    # Ensure model is loaded when recording starts
-                    if not self.modelLoaded:
-                        self.loadModel()
+                    self.startRecording()
+                    startTime = time.time()  # still needed to reset program timeout
                 else:
-                    print("Recording stopped...")
-                    self.playNotification("recordingOff")
+                    self.stopRecording()
 
-                # Wait for key release to prevent multiple triggers
                 while keyboard.is_pressed(self.recordingToggleKey):
                     time.sleep(0.1)
 
             if keyboard.is_pressed(self.outputToggleKey):
                 self.toggleOutput()
-                # Wait for key release to prevent multiple triggers
                 while keyboard.is_pressed(self.outputToggleKey):
                     time.sleep(0.1)
 
@@ -405,14 +375,12 @@ class SpeechToTextTranscriber(BaseTranscriber):
         while self.isProgramActive:
             currentTime = time.time()
 
-            # If recording is inactive and model is loaded
             if not self.isRecordingActive and self.modelLoaded:
                 if (currentTime - self.lastActivityTime) >= self.modelUnloadTimeout:
                     print(f"Model inactive for {self.modelUnloadTimeout} seconds, unloading...")
                     self.unloadModel()
                     self.playNotification("modelUnloaded")
 
-            # If recording is active but model isn't loaded
             if self.isRecordingActive and not self.modelLoaded:
                 self.loadModel()
                 self.lastActivityTime = currentTime
@@ -442,12 +410,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
 
     def startThreads(self):
         """Start monitoring threads."""
-        # Start keyboard monitor in a separate thread
         keyboardThread = threading.Thread(target=self.monitorKeyboardShortcuts)
         keyboardThread.daemon = True
         keyboardThread.start()
 
-        # Start model manager in a separate thread
         modelThread = threading.Thread(target=self.modelManager)
         modelThread.daemon = True
         modelThread.start()
@@ -468,7 +434,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 self.lastTranscriptionTime = self.recordingStartTime
                 self.lastActivityTime = time.time()
 
-            # Check if recording duration exceeds max duration
             currentTime = time.time()
             if (currentTime - self.recordingStartTime) >= self.maxDurationRecording:
                 print(
@@ -485,14 +450,12 @@ class SpeechToTextTranscriber(BaseTranscriber):
         currentTime = time.time()
         audioData = None
 
-        # ────────────── MODE: constantInterval ──────────────
         if self.transcriptionMode == "constantInterval":
             if (currentTime - self.lastTranscriptionTime) >= self.transcriptionInterval:
                 audioData = self.audioBuffer.copy()
                 self.audioBuffer = np.array([], dtype=np.float32)
                 self.lastTranscriptionTime = currentTime
 
-        # ────────────── MODE: busyContinuous ──────────────
         elif self.transcriptionMode == "busyContinuous":
             requiredSamples = int(self.busyContinuousTime * self.actualSampleRate)
             if len(self.audioBuffer) >= requiredSamples:
@@ -503,7 +466,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
                     self.audioBuffer = np.array([], dtype=np.float32)
                     self.lastTranscriptionTime = currentTime
 
-        # ───────────────────────────────────────────────────
         if audioData is None:
             return
 
@@ -533,7 +495,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
         isBelow = loudnessValue < loudnessThresh
         isFalseDetection = isFalseWord and isBelow
 
-        # ─────────────────────────── valid speech ────────────────────────────
         if not isEmpty and not isFalseDetection:
             print("Transcription:", transcription)
 
@@ -544,7 +505,6 @@ class SpeechToTextTranscriber(BaseTranscriber):
             self.lastValidTranscriptionTime = now  # ← mark last real speech
             return
 
-        # ─────────────────────── silence / false detection ───────────────────
         silentFor = now - self.lastValidTranscriptionTime
         if self.debugPrint:
             print(f"Silent for {silentFor:.1f}s "
@@ -569,17 +529,13 @@ class SpeechToTextTranscriber(BaseTranscriber):
         Continuously record audio, transcribe it, and type the transcription.
         """
         try:
-            # Load model initially
             print("Warming up model...")
             self.loadModel()
 
-            # Setup device info
             self.setupDeviceInfo(deviceId)
 
-            # Start monitoring threads
             self.startThreads()
 
-            # Start audio stream
             with sd.InputStream(samplerate=self.actualSampleRate,
                                 channels=self.actualChannels,
                                 device=deviceId,
@@ -590,19 +546,14 @@ class SpeechToTextTranscriber(BaseTranscriber):
                 self.lastTranscriptionTime = 0
 
                 while self.isProgramActive:
-                    # Handle recording timing
                     self.handleRecordingTiming()
 
-                    # Process audio chunks
                     self.processAudioChunks()
 
-                    # Transcribe audio
                     self.transcribeAudio()
 
-                    # Cleanup if recording inactive
                     self.cleanupInactiveRecording()
 
-                    # Small sleep to prevent high CPU usage
                     time.sleep(0.01)
 
         except Exception as e:
@@ -611,12 +562,10 @@ class SpeechToTextTranscriber(BaseTranscriber):
         finally:
             self.isRecordingActive = False
             self.isProgramActive = False
-            # Call base class cleanup
             super().cleanup()
             print("Program stopped.")
 
 
-# Main execution
 if __name__ == "__main__":
     try:
         transcriber = SpeechToTextTranscriber(
@@ -639,25 +588,6 @@ if __name__ == "__main__":
             debugPrint=True
         )
 
-        # Use default input device
         transcriber.run()
     except Exception as e:
         print(f"Program error: {e}")
-
-    # # fileTranscriber example
-    # # Create file transcriber
-    # transcriber = FileTranscriber(
-    #     modelName="openai/whisper-large-v3",
-    #     language="en",
-    #     removeTrailingDots=True,
-    #     debugPrint=True
-    # )
-    #
-    # # Transcribe file to console
-    # transcription = transcriber.transcribeFile(r"C:\Users\pc\Documents\Sound Recordings\shitSampleToSeeCanItBeTranscribedOrNot.mp3")
-    #
-    # # Transcribe file and save to output file
-    # transcription = transcriber.transcribeFile(r"C:\Users\pc\Documents\Sound Recordings\shitSampleToSeeCanItBeTranscribedOrNot.mp3", r"C:\Users\pc\Documents\Sound Recordings\transcription_shitSampleToSeeCanItBeTranscribedOrNot_mp3.txt")
-    #
-    # # Clean up
-    # transcriber.cleanup()
