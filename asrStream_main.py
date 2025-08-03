@@ -1178,36 +1178,48 @@ class SystemInteractionHandler:
         maxDuration = self.config.get('maxDurationProgramActive', 3600)
         recordingToggleKey = self.config.get('recordingToggleKey')
         outputToggleKey = self.config.get('outputToggleKey')
+        keyboard_module = None  # Define variable outside try block
 
         try:
-            import keyboard
+            import keyboard  # Import the module
+            keyboard_module = keyboard  # Assign to variable
             keyboardAvailable = True
+            logInfo("Keyboard library imported successfully for hotkey monitoring.")  # Added log
         except ImportError:
-            logError("Keyboard library not installed or permission denied. Hotkeys disabled.")
-            logError("Try running with sudo (Linux/macOS) or installing 'keyboard'.")
+            logError("Keyboard library not installed. Hotkeys disabled.")
+            logError("Try: sudo /path/to/your/python3 -m pip install keyboard")
             keyboardAvailable = False
         except Exception as e:
             logError(f"Failed to initialize keyboard library: {e}. Hotkeys disabled.")
+            import traceback
+            logError("--- Traceback for keyboard init error ---")
+            logError(traceback.format_exc())
+            logError("---------------------------------------")
             keyboardAvailable = False
 
         while keyboardAvailable and orchestrator.stateManager.shouldProgramContinue() and \
                 (time.time() - threadStartTime) < maxDuration:
             try:
-                if keyboard.is_pressed(recordingToggleKey):
+                if keyboard_module.is_pressed(recordingToggleKey):  # Use the imported module
                     self._logDebug(f"Hotkey '{recordingToggleKey}' pressed.")
                     orchestrator.toggleRecording()
-                    self._waitForKeyRelease(keyboard, recordingToggleKey)  # Pass module
+                    self._waitForKeyRelease(keyboard_module, recordingToggleKey)  # Pass module
 
-                if keyboard.is_pressed(outputToggleKey):
+                if keyboard_module.is_pressed(outputToggleKey):  # Use the imported module
                     self._logDebug(f"Hotkey '{outputToggleKey}' pressed.")
                     orchestrator.toggleOutput()  # Toggles stateManager.outputEnabled
-                    self._waitForKeyRelease(keyboard, outputToggleKey)  # Pass module
+                    self._waitForKeyRelease(keyboard_module, outputToggleKey)  # Pass module
 
             except Exception as e:
-                logError(f"Error in keyboard monitoring loop: {e}")
+                logError(f"Error in keyboard monitoring loop: {e}")  # Log the basic error string
+                import traceback
+                logError("--- Traceback for keyboard monitoring loop error ---")
+                logError(traceback.format_exc())  # Print the full traceback
+                logError("--------------------------------------------------")
+
                 time.sleep(1)  # Pause after error
 
-            time.sleep(0.05)  # Main loop sleep
+            time.sleep(0.05)  # Main loop sleep outside the except block
 
         logInfo("Keyboard shortcut monitor thread stopping.")
         if not orchestrator.stateManager.shouldProgramContinue():
@@ -1215,7 +1227,11 @@ class SystemInteractionHandler:
         else:
             if not keyboardAvailable:
                 logWarning("Stopping program because hotkey monitoring is not available.")
-            orchestrator.stateManager.stopProgram()  # Signal main loop to stop
+            elif (time.time() - threadStartTime) < maxDuration:
+                logWarning("Stopping program because hotkey monitoring loop exited unexpectedly.")
+
+            if not keyboardAvailable or (time.time() - threadStartTime) < maxDuration:
+                orchestrator.stateManager.stopProgram()  # Signal main loop to stop
 
     def _waitForKeyRelease(self, keyboard_module, key):
         """Waits until the specified key is released to prevent rapid toggling."""
@@ -1579,19 +1595,31 @@ class SpeechToTextOrchestrator:
         logInfo("Transcription Worker thread stopping.")
 
     def _startBackgroundThreads(self):
-        """Starts threads for hotkeys, model management, and transcription."""
+        """
+        Starts threads for model management and transcription.
+        Conditionally starts the hotkey monitor only if not on Linux (where it's often problematic).
+        """
         self._logDebug("Starting background threads...")
         self.threads = []  # Clear list
+        threadCount = 0  # Keep track of actual started threads
 
-        keyboardThread = threading.Thread(
-            target=self.systemInteractionHandler.monitorKeyboardShortcuts,
-            args=(self,),
-            name="KeyboardMonitorThread",
-            daemon=True
-        )
-        self.threads.append(keyboardThread)
-        keyboardThread.start()
+        if platform.system() != "Linux":
+            logInfo("Attempting to start keyboard shortcut monitor thread (Non-Linux OS)...")
+            keyboardThread = threading.Thread(
+                target=self.systemInteractionHandler.monitorKeyboardShortcuts,
+                args=(self,),
+                name="KeyboardMonitorThread",
+                daemon=True
+            )
+            self.threads.append(keyboardThread)
+            keyboardThread.start()
+            threadCount += 1
+        else:
+            logWarning(
+                f"Running on Linux ({platform.system()}). Global hotkey monitoring thread is disabled.")
+            logInfo("Use Ctrl+C to stop the script.")
 
+        logInfo("Starting Model Lifecycle Manager thread...")
         modelThread = threading.Thread(
             target=self.modelLifecycleManager.manageModelLifecycle,
             name="ModelManagerThread",
@@ -1599,16 +1627,19 @@ class SpeechToTextOrchestrator:
         )
         self.threads.append(modelThread)
         modelThread.start()
+        threadCount += 1
 
+        logInfo("Starting Transcription Worker thread...")
         transcriptionThread = threading.Thread(
-            target=self._transcriptionWorkerLoop,  # Target the new worker method
+            target=self._transcriptionWorkerLoop,
             name="TranscriptionWorkerThread",
-            daemon=True  # Ensure it exits if main thread exits unexpectedly
+            daemon=True
         )
         self.threads.append(transcriptionThread)
         transcriptionThread.start()
+        threadCount += 1
 
-        self._logDebug(f"Started {len(self.threads)} background threads.")
+        self._logDebug(f"Started {threadCount} background threads.")
 
     def toggleRecording(self):
         """Toggles the recording state. Called by systemInteractionHandler."""
