@@ -46,7 +46,7 @@ userSettings = {
     # Choose the ASR model. Examples:
     # "modelName": "openai/whisper-tiny.en",
     # Local Whisper (requires Transformers, smaller for quick test)
-    #"modelName": "openai/whisper-large-v3",  # Local Whisper (requires Transformers)
+    # "modelName": "openai/whisper-large-v3",  # Local Whisper (requires Transformers)
     # "modelName": "openai/whisper-medium.en", # Local Whisper (English-only, smaller)
     "modelName": "nvidia/canary-180m-flash",  # Example: Remote NeMo (requires WSL server)
     # "modelName": "nvidia/parakeet-rnnt-1.1b", # Example: Remote NeMo (larger, requires WSL server)

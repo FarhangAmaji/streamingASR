@@ -450,9 +450,11 @@ class RealTimeAudioProcessor:
         logDebug("getAudioBufferCopyAndClear called (e.g., by force transcription hotkey).")
         if self.audioBuffer.size > 0:
             audio_to_transcribe = self.audioBuffer.copy()
-            duration = audio_to_transcribe.size / self.config.get('actualSampleRate', 16000) if self.config.get('actualSampleRate', 16000) > 0 else 0
+            duration = audio_to_transcribe.size / self.config.get('actualSampleRate',
+                                                                  16000) if self.config.get(
+                'actualSampleRate', 16000) > 0 else 0
             logInfo(f"Retrieved {duration:.2f}s of audio from buffer for forced transcription.")
-            self.clearBuffer() # This also resets dictation state
+            self.clearBuffer()  # This also resets dictation state
             # Reset constant interval timer as well, as this segment is now handled
             self.lastTranscriptionTriggerTime = time.time()
             logDebug("Forced transcription: Constant interval timer reset.")
