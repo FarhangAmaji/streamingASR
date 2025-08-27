@@ -1,0 +1,11 @@
+torch
+transformers
+accelerate
+huggingface_hub
+sounddevice
+soundfile
+numpy
+keyboard
+pygame
+pyautogui
+requests
