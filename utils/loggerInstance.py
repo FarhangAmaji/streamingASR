@@ -9,7 +9,7 @@ uniLogger = DynamicLogger(
 uniDebugLogger = DynamicLogger(
     highOrderOptions=highOrderOptions,
     simpleLog=not globalDebugPrint,
-    exclude=not globalDebugPrint,
+    exclude= True,
     logLevel=DynamicLogger.DEBUG,
     timestampFormat="%H:%M:%S.%f",
 )
