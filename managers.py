@@ -10,16 +10,14 @@
 #   based on activity timeouts, interacting with the specific ASR handler.
 # ==============================================================================
 import os
-import sys  # Needed for stderr print during early error
+import sys
 import time
 from pathlib import Path
 
-# Import logging helpers from utils
-from utils import logWarning, logDebug, logInfo, logError
+# Import the new universal logger instances
+from utils.loggerInstance import uniLogger, uniDebugLogger
 
 
-# Pygame needed for notifications in ModelLifecycleManager (indirectly via SystemInteractionHandler)
-# PyAutoGUI is not directly used here.
 # ==================================
 # Configuration Management
 # ==================================
@@ -27,50 +25,48 @@ class ConfigurationManager:
     """Stores and provides access to all application settings."""
 
     def __init__(self, **kwargs):
+        """Initializes the configuration with user-provided settings and derives internal values."""
         self._config = kwargs
         # --- Derived/Internal Settings ---
-        # Determine script directory robustly
+        # Determine the directory of the running script robustly
         self._config['scriptDir'] = self._findScriptDirectory()
-        # Initialize placeholders for settings derived later
-        self._config['device'] = None  # Set by AsrModelHandler
-        # Set initial 'actual' values from requested, may be updated by AudioHandler
+        # Initialize placeholders for settings that will be determined later by other components
+        self._config['device'] = None  # Will be set by the AsrModelHandler
+        # Set initial 'actual' audio values from requested config; these may be updated by AudioHandler
         self._config['actualSampleRate'] = self._config.get('sampleRate', 16000)
         self._config['actualChannels'] = self._config.get('channels', 1)
-        logDebug(f"Configuration initialized. Script directory: {self._config['scriptDir']}")
+        uniDebugLogger.debug(
+            f"Configuration initialized. Script directory: {self._config['scriptDir']}")
 
     def _findScriptDirectory(self):
-        """Finds the directory of the main running script."""
+        """Finds the directory of the main running script to locate assets like sound files."""
         try:
             import __main__
             if hasattr(__main__, '__file__') and __main__.__file__:
+                # This is the most reliable method
                 mainFilePath = Path(os.path.abspath(__main__.__file__))
                 return mainFilePath.parent
             else:
-                # Fallback for environments where __main__.__file__ is not set (e.g., interactive)
-                # Try using the directory of this file (managers.py) as a less reliable fallback
-                logWarning(
+                # Fallback for environments where __main__.__file__ is not set (e.g., interactive REPL)
+                uniLogger.warning(
                     "Cannot determine main script path (__main__.__file__ missing/None), using managers.py directory as fallback.")
                 return Path(os.path.dirname(os.path.abspath(__file__)))
         except (AttributeError, ImportError, TypeError):
-            logWarning("Error determining script directory, using CWD as fallback.", exc_info=True)
-            return Path.cwd()  # Current working directory as last resort
+            # Last resort if introspection fails
+            uniLogger.warning("Error determining script directory, using CWD as fallback.",
+                              excInfo=True)
+            return Path.cwd()
 
     def get(self, key, default=None):
-        """Gets a configuration value by key, returning default if not found."""
+        """Gets a configuration value by key, returning a default if the key is not found."""
         return self._config.get(key, default)
 
     def set(self, key, value):
-        """Sets or updates a configuration value."""
-        # Log if a key is being updated? Optional.
-        # if key in self._config:
-        #     logDebug(f"Configuration updated: '{key}' changed from '{self._config[key]}' to '{value}'")
-        # else:
-        #     logDebug(f"Configuration set: '{key}' = '{value}'")
+        """Sets or updates a configuration value. Used for dynamic settings like the detected device."""
         self._config[key] = value
 
     def getAll(self):
-        """Returns a copy of the entire configuration dictionary."""
-        # Return a copy to prevent external modification of the internal dict
+        """Returns a copy of the entire configuration dictionary to prevent external modification."""
         return self._config.copy()
 
 
@@ -78,163 +74,149 @@ class ConfigurationManager:
 # State Management
 # ==================================
 class StateManager:
-    """Manages the dynamic state of the real-time transcriber."""
+    """Manages the dynamic state of the real-time transcriber application."""
 
     def __init__(self, config):
+        """Initializes the state manager based on default values from the configuration."""
         if not isinstance(config, ConfigurationManager):
-            # Use basic print/log error as logger might not be fully set up if config fails early
-            print("ERROR: StateManager requires a valid ConfigurationManager instance.",
-                  file=sys.stderr)
+            # This is a critical setup error, so log and raise an exception.
+            uniLogger.error("StateManager requires a valid ConfigurationManager instance.")
             raise ValueError("StateManager requires a valid ConfigurationManager.")
         self.config = config
-        # Initialize state based on configuration defaults
-        self.isProgramActive = True  # Overall application loop control
+        # Initialize state flags from configuration defaults
+        self.isProgramActive = True  # Overall application loop control flag
         self.isRecordingActive = self.config.get('isRecordingActive', True)
         self.outputEnabled = self.config.get('outputEnabled', False)
-        # Timing state initialization
+        # Initialize timing-related state variables
         now = time.time()
         self.programStartTime = now
-        self.lastActivityTime = now  # Tracks model/server interaction activity
-        # Initialize recordingStartTime only if starting active
+        self.lastActivityTime = now  # Tracks user/system activity for model unload timeout
         self.recordingStartTime = now if self.isRecordingActive else 0
-        # Tracks last time valid text was output, used for idle timeout
-        self.lastValidTranscriptionTime = now
-        logDebug("StateManager initialized.")
-        logInfo(
+        self.lastValidTranscriptionTime = now  # Tracks last text output for idle timeout
+        uniDebugLogger.debug("StateManager initialized.")
+        uniLogger.info(
             f"Initial State - Recording: {self.isRecordingActive}, Output Enabled: {self.outputEnabled}")
 
     # --- Getters ---
-    def isRecording(self):
+    def isRecording(self) -> bool:
         """Returns True if recording is currently active, False otherwise."""
         return self.isRecordingActive
 
-    def isOutputEnabled(self):
+    def isOutputEnabled(self) -> bool:
         """Returns True if text output (typing/clipboard) is enabled, False otherwise."""
         return self.outputEnabled
 
-    def shouldProgramContinue(self):
+    def shouldProgramContinue(self) -> bool:
         """Returns True if the main application loop should continue, False otherwise."""
         return self.isProgramActive
 
     # --- Setters ---
-    def startRecording(self):
-        """Activates recording state and updates relevant timers. Returns True if state changed."""
+    def startRecording(self) -> bool:
+        """Activates the recording state and updates relevant timers. Returns True if the state changed."""
         if not self.isRecordingActive:
-            logDebug("Setting state to Recording: ON")
+            uniDebugLogger.debug("Setting state to Recording: ON")
             self.isRecordingActive = True
             now = time.time()
             self.recordingStartTime = now
-            self.lastActivityTime = now  # Mark activity for model manager/timeout checks
-            self.lastValidTranscriptionTime = now  # Reset idle timer on start
+            self.lastActivityTime = now  # Starting recording is considered an activity
+            self.lastValidTranscriptionTime = now  # Reset the idle timer on recording start
             return True  # State changed
-        logDebug("startRecording called but already recording.")
+        uniDebugLogger.debug("startRecording called but already recording.")
         return False  # No state change
 
-    def stopRecording(self):
-        """Deactivates recording state and updates activity time. Returns True if state changed."""
+    def stopRecording(self) -> bool:
+        """Deactivates the recording state and updates activity time. Returns True if the state changed."""
         if self.isRecordingActive:
-            logDebug("Setting state to Recording: OFF")
+            uniDebugLogger.debug("Setting state to Recording: OFF")
             self.isRecordingActive = False
-            self.recordingStartTime = 0  # Reset session start time
-            # Mark activity time when stopping recording as well
-            self.lastActivityTime = time.time()
+            self.recordingStartTime = 0  # Reset the recording session start time
+            self.lastActivityTime = time.time()  # Stopping is also an activity
             return True  # State changed
-        logDebug("stopRecording called but already stopped.")
+        uniDebugLogger.debug("stopRecording called but already stopped.")
         return False  # No state change
 
-    def toggleOutput(self):
-        """Toggles the text output state. Returns the new state (True if enabled, False if disabled)."""
+    def toggleOutput(self) -> bool:
+        """Toggles the text output state. Returns the new state (True if enabled)."""
         self.outputEnabled = not self.outputEnabled
         status = 'ENABLED' if self.outputEnabled else 'DISABLED'
-        logInfo(f"Text Output {status}")
-        logDebug(f"Setting state Output Enabled: {self.outputEnabled}")
-        # Mark activity when toggling output, might interact with server or model state implicitly
-        self.updateLastActivityTime()
-        return self.outputEnabled  # Return the new state
+        uniLogger.info(f"Text Output {status}")
+        uniDebugLogger.debug(f"Setting state Output Enabled: {self.outputEnabled}")
+        self.updateLastActivityTime()  # Toggling output is a user activity
+        return self.outputEnabled
 
     def stopProgram(self):
-        """Signals the main application loop to stop."""
+        """Signals the main application loop to stop by setting the active flag to False."""
         if self.isProgramActive:
-            logDebug("Setting state Program Active: OFF")
+            uniDebugLogger.debug("Setting state Program Active: OFF")
             self.isProgramActive = False
-        # else: logDebug("stopProgram called but already stopped.")
 
     def updateLastActivityTime(self):
-        """Updates the timestamp of the last significant activity (used for model unload timeout)."""
+        """Updates the timestamp of the last significant activity (used for the model unload timeout)."""
         now = time.time()
-        logDebug(f"Updating last activity time to {now:.2f}")
+        uniDebugLogger.debug(f"Updating last activity time to {now:.2f}")
         self.lastActivityTime = now
 
     def updateLastValidTranscriptionTime(self):
-        """Updates the timestamp of the last valid transcription output (used for idle timeout)."""
+        """Updates the timestamp of the last valid transcription output (used for the idle timeout)."""
         now = time.time()
-        logDebug(f"Updating last valid transcription time to {now:.2f} (idle timer reset).")
+        uniDebugLogger.debug(
+            f"Updating last valid transcription time to {now:.2f} (idle timer reset).")
         self.lastValidTranscriptionTime = now
 
     # --- Timeout Checks ---
-    def checkRecordingTimeout(self):
+    def checkRecordingTimeout(self) -> bool:
         """
         Checks if the maximum recording session duration has been exceeded.
-        Returns True if timeout reached, False otherwise. (Treats 0 or less as no limit).
+        Returns True if the timeout is reached. (A value of 0 means no limit).
         """
-        maxDuration = self.config.get('maxDurationRecording', 0)  # Default 0 (no limit)
-        # If maxDuration is 0 or negative, treat it as no limit
+        maxDuration = self.config.get('maxDurationRecording', 0)
         if maxDuration <= 0:
-            return False  # Never time out based on recording duration
-        # Only check if currently recording and recording started properly
+            return False  # Timeout is disabled
         if not self.isRecordingActive or self.recordingStartTime <= 0:
             return False
         elapsed = time.time() - self.recordingStartTime
         if elapsed >= maxDuration:
-            logDebug(
+            uniDebugLogger.debug(
                 f"Max recording duration check: Elapsed {elapsed:.1f}s >= Limit {maxDuration}s. Timeout.")
-            return True  # Timeout reached
-        # else: logDebug(f"Max recording duration check: Elapsed {elapsed:.1f}s < Limit {maxDuration}s. OK.")
-        return False  # Timeout not reached
+            return True
+        return False
 
-    def checkIdleTimeout(self):
+    def checkIdleTimeout(self) -> bool:
         """
-        Checks if the consecutive idle time (no valid transcription output while recording)
-        limit has been reached. Returns True if timeout reached, False otherwise.
-        (Treats 0 or less as no limit).
+        Checks if the idle time (no valid transcription while recording) has been exceeded.
+        Returns True if the timeout is reached.
         """
-        # Only check if recording is supposed to be active
         if not self.isRecordingActive:
             return False
-        idleTimeout = self.config.get('consecutiveIdleTime', 0)  # Default 0 (no limit)
-        # If idleTimeout is 0 or negative, treat it as no limit
+        idleTimeout = self.config.get('consecutiveIdleTime', 0)
         if idleTimeout <= 0:
-            return False  # Never time out based on idle time
-        # Check time since the last *valid* transcription was output
+            return False  # Timeout is disabled
         silentFor = time.time() - self.lastValidTranscriptionTime
         if silentFor >= idleTimeout:
-            logDebug(
+            uniDebugLogger.debug(
                 f"Idle timeout check: Silent for {silentFor:.1f}s >= Limit {idleTimeout}s. Timeout.")
-            return True  # Idle timeout reached
-        # else: logDebug(f"Idle timeout check: Silent for {silentFor:.1f}s < Limit {idleTimeout}s. OK.")
-        return False  # Idle timeout not reached
+            return True
+        return False
 
-    def timeSinceLastActivity(self):
-        """Calculates the time elapsed since the last recorded activity (model/server interaction)."""
+    def timeSinceLastActivity(self) -> float:
+        """Calculates the time elapsed since the last recorded user/system activity."""
         return time.time() - self.lastActivityTime
 
     def checkProgramTimeout(self):
         """
         Checks if the maximum program duration has been exceeded.
-        If timeout is reached, it calls stopProgram() and returns True.
-        Returns False otherwise. (Treats 0 or less as no limit).
+        If the timeout is reached, it signals the program to stop and returns True.
         """
-        maxDuration = self.config.get('maxDurationProgramActive', 0)  # Default 0 (no limit)
+        maxDuration = self.config.get('maxDurationProgramActive', 0)
         if maxDuration <= 0:
-            return False  # Never time out based on program duration
+            return False  # Timeout is disabled
         elapsed = time.time() - self.programStartTime
         if elapsed >= maxDuration:
-            logDebug(
+            uniDebugLogger.debug(
                 f"Program timeout check: Elapsed {elapsed:.1f}s >= Limit {maxDuration}s. Timeout.")
-            self.stopProgram()  # Signal program stop
-            return True  # Timeout reached
-        # else: logDebug(f"Program timeout check: Elapsed {elapsed:.1f}s < Limit {maxDuration}s. OK.")
-        return False  # Timeout not reached
+            self.stopProgram()  # Signal the program to stop
+            return True
+        return False
 
 
 # ==================================
@@ -242,93 +224,81 @@ class StateManager:
 # ==================================
 class ModelLifecycleManager:
     """
-    Handles automatic loading/unloading of the ASR model based on activity.
-    Works for both local handlers and the remote client handler.
+    Handles automatic loading and unloading of the ASR model based on application activity
+    to conserve system resources (especially VRAM).
     """
 
     def __init__(self, config, stateManager, asrModelHandler, systemInteractionHandler):
-        # Validate inputs
+        """Initializes the manager with all necessary application components."""
+        # Validate inputs to ensure proper setup
         if not isinstance(config, ConfigurationManager): raise ValueError(
             "Invalid ConfigurationManager")
         if not isinstance(stateManager, StateManager): raise ValueError("Invalid StateManager")
-        # Check if asrModelHandler is an instance of the abstract base class if available
-        # from modelHandlers import AbstractAsrModelHandler # Avoid circular import if possible
-        # if not isinstance(asrModelHandler, AbstractAsrModelHandler): raise ValueError("Invalid AsrModelHandler")
         if asrModelHandler is None: raise ValueError("AsrModelHandler cannot be None")
-        # systemInteractionHandler might be optional depending on features, but needed for sound here
         if systemInteractionHandler is None: raise ValueError(
             "SystemInteractionHandler cannot be None")
         self.config = config
         self.stateManager = stateManager
         self.asrModelHandler = asrModelHandler
         self.systemInteractionHandler = systemInteractionHandler
-        logDebug("ModelLifecycleManager initialized.")
+        uniDebugLogger.debug("ModelLifecycleManager initialized.")
 
     def manageModelLifecycle(self):
         """
-        Runs in a background thread to monitor activity and load/unload the model.
+        Runs in a background thread to periodically check and manage the model's loaded state.
         """
         handlerType = type(self.asrModelHandler).__name__
-        logInfo(f"Starting Model Lifecycle Manager thread (Handler: {handlerType}).")
-        checkInterval = 10  # Seconds to wait between checks (adjust as needed)
+        uniLogger.info(f"Starting Model Lifecycle Manager thread (Handler: {handlerType}).")
+        checkInterval = 10  # Seconds to wait between checks
         while self.stateManager.shouldProgramContinue():
             try:
-                # Get current state
+                # Get current application state
                 isRecording = self.stateManager.isRecording()
                 modelIsCurrentlyLoaded = self.asrModelHandler.isModelLoaded()
-                unloadTimeout = self.config.get('model_unloadTimeout', 0)  # Default 0 (disabled)
+                unloadTimeout = self.config.get('model_unloadTimeout', 0)
+
                 # --- Unload Condition ---
-                # Unload if:
-                # 1. Timeout is enabled (unloadTimeout > 0)
-                # 2. Currently NOT recording
-                # 3. Model IS currently loaded
+                # Unload if timeout is enabled, not recording, and model is loaded
                 if unloadTimeout > 0 and not isRecording and modelIsCurrentlyLoaded:
                     timeInactive = self.stateManager.timeSinceLastActivity()
                     if timeInactive >= unloadTimeout:
-                        logInfo(
+                        uniLogger.info(
                             f"Model inactive for {timeInactive:.1f}s (>= {unloadTimeout}s), requesting unload...")
                         try:
-                            unloadSuccess = self.asrModelHandler.unloadModel()  # Request unload (local or remote)
+                            unloadSuccess = self.asrModelHandler.unloadModel()
                             if unloadSuccess:
-                                # Play sound only if unload seemed successful
                                 self.systemInteractionHandler.playNotification("modelUnloaded")
-                                logInfo("Model unload successful.")
+                                uniLogger.info("Model unload successful.")
                             else:
-                                logWarning("Model unload request reported failure.")
+                                uniLogger.warning("Model unload request reported failure.")
                         except Exception as e:
-                            logError(f"Error during model unload request: {e}", exc_info=True)
-                    # else: # Log inactivity duration periodically if debugging is needed
-                    #      if logging.getLogger("SpeechToTextApp").isEnabledFor(logging.DEBUG):
-                    #           logDebug(f"Model loaded but inactive. Time since last activity: {timeInactive:.1f}s / {unloadTimeout}s")
+                            uniLogger.error(f"Error during model unload request: {e}", excInfo=True)
+
                 # --- Load Condition ---
-                # Load if:
-                # 1. Currently IS recording
-                # 2. Model IS NOT currently loaded
+                # Load if recording is active but the model is not currently loaded
                 elif isRecording and not modelIsCurrentlyLoaded:
-                    logInfo("Recording active but model not loaded. Triggering model load/check...")
+                    uniLogger.info(
+                        "Recording active but model not loaded. Triggering model load/check...")
                     try:
-                        loadSuccess = self.asrModelHandler.loadModel()  # Request load (local or remote check/load)
+                        loadSuccess = self.asrModelHandler.loadModel()
                         if not loadSuccess:
-                            # loadModel logs details of failure (local or remote communication)
-                            logWarning(
+                            uniLogger.warning(
                                 "Model load/check request reported failure. Will retry later.")
-                            # Optional: Implement backoff strategy here?
-                            time.sleep(5)  # Wait a bit before next check if load failed
-                        # else: Load successful (logged within loadModel)
+                            time.sleep(5)  # Wait a bit before the next check if loading failed
                     except Exception as e:
-                        logError(f"Error during model load request: {e}", exc_info=True)
-                        time.sleep(5)  # Wait after error
-                    # Update activity time after a load attempt (success or fail) to reset unload timer
+                        uniLogger.error(f"Error during model load request: {e}", excInfo=True)
+                        time.sleep(5)  # Wait after an error
+                    # A load attempt is considered an activity, resetting the unload timer
                     self.stateManager.updateLastActivityTime()
             except Exception as loopError:
-                # Catch unexpected errors within the lifecycle loop itself
-                logError(f"Error in ModelLifecycleManager loop: {loopError}", exc_info=True)
-                # Avoid busy-looping if error persists
+                # Catch any unexpected errors within the management loop
+                uniLogger.error(f"Error in ModelLifecycleManager loop: {loopError}", excInfo=True)
                 time.sleep(checkInterval)
+
             # --- Periodic Check Interval ---
-            # Use a timed sleep that checks the program state periodically for faster shutdown
+            # Sleep in small chunks to allow for a responsive shutdown
             loopStartTime = time.time()
             while (
                     time.time() - loopStartTime < checkInterval) and self.stateManager.shouldProgramContinue():
-                time.sleep(0.5)  # Sleep in smaller chunks to be responsive
-        logInfo("Model Lifecycle Manager thread stopping.")
+                time.sleep(0.5)
+        uniLogger.info("Model Lifecycle Manager thread stopping.")

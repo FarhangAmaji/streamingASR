@@ -63,7 +63,7 @@ FINAL_DEFAULTS = {
     ARG_SIMPLE_LOG: False,  # Default to not using simpleLog mode.
     ARG_STACK_INFO: False,  # Default to not including stack info.
     ARG_MESSAGE_ARGS: (),  # Default to an empty tuple for messageArgs.
-    ARG_FILE_WRITE_MODE: 'w',  # Default to custom write mode. NEW
+    ARG_FILE_WRITE_MODE: 'a',  # Default to custom write mode. NEW
 }
 
 # --- Default Format Strings, Placeholders, and Separators ---
