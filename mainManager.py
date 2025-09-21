@@ -170,7 +170,6 @@ class SpeechToTextOrchestrator:
                 raise FileNotFoundError(
                     f"WSL script '{wslServerScriptPathWindows.name}' not found at the expected path: {wslServerScriptPathWindows}")
 
-            # Convert the Windows path to a WSL-compatible path (e.g., C:\... -> /mnt/c/...)
             wslServerScriptPathWsl = convertWindowsPathToWsl(wslServerScriptPathWindows)
             if not wslServerScriptPathWsl:
                 raise ValueError(
@@ -335,7 +334,6 @@ class SpeechToTextOrchestrator:
                 uniLogger.error(
                     f"--- Captured WSL Server Output (PID: {pid}) ---\n{stdoutData.strip()}",
                     indicatorName="WSL_SUBPROCESS_OUTPUT")
-                # Provide hints for common errors found in the output
                 if "sudo: a password is required" in stdoutData:
                     uniLogger.error("!!! Detected 'sudo password required'. Launch failed.")
                 if "Address already in use" in stdoutData:
@@ -394,7 +392,6 @@ class SpeechToTextOrchestrator:
         """Starts all necessary background threads."""
         uniDebugLogger.debug("Starting background threads...")
 
-        # A wrapper to catch and log exceptions that occur inside threads
         def threadWrapper(targetFunc, threadName, *args, **kwargs):
             uniDebugLogger.debug(f"Thread '{threadName}' starting...")
             try:
@@ -417,11 +414,6 @@ class SpeechToTextOrchestrator:
                                       daemon=True)
             self.threads.append(thread)
             thread.start()
-
-        time.sleep(0.1)  # Give threads a moment to start
-        if any(not t.is_alive() for t in self.threads):
-            uniLogger.warning(
-                "One or more background threads may have failed to start or exited immediately.")
 
     def toggleRecording(self):
         """Toggles the recording state."""
@@ -453,7 +445,6 @@ class SpeechToTextOrchestrator:
         if audioData is not None and audioData.size > 0:
             sampleRate = self.config.get('actualSampleRate')
             try:
-                # Put the audio data onto the queue for the worker thread
                 self.transcriptionRequestQueue.put((audioData, sampleRate), block=True, timeout=0.5)
                 uniLogger.info(f"Forced transcription: Queued audio.")
                 self.stateManager.updateLastActivityTime()
@@ -485,14 +476,12 @@ class SpeechToTextOrchestrator:
         """Handles the initial setup sequence."""
         uniLogger.info("Running initial setup...")
         serverReachable = True
-        # If using a remote model, launch and check the WSL server first
         if isinstance(self.asrModelHandler, RemoteNemoClientHandler):
             uniLogger.info("Remote handler detected, checking WSL server...")
             serverReachable = self._launchWslServer()
             if not serverReachable:
                 uniLogger.error("WSL NeMo server check failed.")
 
-        # If the server is reachable (or if using a local model), attempt to load the model
         if serverReachable:
             uniLogger.info("Attempting initial ASR model load...")
             if not self.asrModelHandler.loadModel():
@@ -502,7 +491,6 @@ class SpeechToTextOrchestrator:
                     self.stateManager.stopProgram()
                     return
 
-        # Start background threads if no critical errors have occurred
         if self.stateManager.shouldProgramContinue():
             self._startBackgroundThreads()
 
