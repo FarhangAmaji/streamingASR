@@ -146,20 +146,17 @@ class SpeechToTextOrchestrator:
             return
         try:
             # --- Robust Path Finding ---
-            # Assume the project root is the directory where the main script is located.
             if hasattr(sys, 'argv') and sys.argv[0]:
                 project_root = Path(sys.argv[0]).parent.resolve()
             else:
-                # Fallback if sys.argv is not available, uses the current working directory
                 project_root = Path.cwd().resolve()
 
-            # --- START: SOLUTION FOR ModuleNotFoundError ---
-            # Convert the project root path from Windows format to WSL format for PYTHONPATH
+            # --- START: WSL PATH CONVERSION ---
             project_root_wsl = convertWindowsPathToWsl(project_root)
             if not project_root_wsl:
                 raise ValueError(f"Failed to convert project root to WSL path: {project_root}")
             uniDebugLogger.debug(f"Project root path for PYTHONPATH in WSL: {project_root_wsl}")
-            # --- END: SOLUTION ---
+            # --- END: WSL PATH CONVERSION ---
 
             wslServerScriptFilename = "wslServer/serverApp.py"
             wslServerScriptPathWindows = project_root / wslServerScriptFilename
@@ -182,18 +179,13 @@ class SpeechToTextOrchestrator:
 
             commandBase = ["wsl.exe", "-d", wslDistro, "--"]
 
-            # --- START: SOLUTION FOR ModuleNotFoundError ---
-            # Use 'env' to set the PYTHONPATH environment variable for the python command.
-            # This tells the Python interpreter inside WSL where to look for modules like 'utils'.
             commandInsideWsl = ["env", f"PYTHONPATH={project_root_wsl}", "/usr/bin/python3",
                                 wslServerScriptPathWsl, "--model_name",
                                 modelName, "--port", str(wslServerPort), "--load_on_start"]
-            # --- END: SOLUTION ---
 
             if useSudo:
                 uniLogger.warning(
                     "Config 'wslUseSudo' is True. This requires passwordless sudo in WSL.")
-                # Insert 'sudo' after the 'env' command
                 commandInsideWsl.insert(2, "sudo")
 
             self.wslLaunchCommand = commandBase + commandInsideWsl
@@ -453,6 +445,67 @@ class SpeechToTextOrchestrator:
         else:
             uniLogger.info("Force transcription: Audio buffer was empty.")
 
+    # --- NEW REAL-TIME AUDIO SETTINGS LOGIC ---
+    def _applyAudioSettings(self):
+        """Applies non-critical audio settings changes by restarting the audio stream."""
+        newRate = self.config.get('sampleRate')
+        newChannels = self.config.get('channels')
+
+        currentRate = self.config.get('actualSampleRate')
+        currentChannels = self.config.get('actualChannels')
+
+        if currentRate != newRate or currentChannels != newChannels:
+            uniLogger.info(
+                f"Applying Real-time Audio Settings: Rate {currentRate}->{newRate}, Channels {currentChannels}->{newChannels}")
+            if self.audioHandler:
+                self.audioHandler.stopStream()
+                # Re-setup device info (will read new values from self.config)
+                self.audioHandler._setupDeviceInfo()
+                if self.stateManager and self.stateManager.isRecording():
+                    self.audioHandler.startStream()
+
+            # Update internal actual values (ensures consistency)
+            self.config.set('actualSampleRate', newRate)
+            self.config.set('actualChannels', newChannels)
+
+        self.config.audio_settings_changed = False
+        uniLogger.info("Real-time Audio Settings applied successfully.")
+
+    # --- NEW REAL-TIME WSL SETTINGS LOGIC ---
+    def _restart_wsl_backend(self):
+        """
+        Destroys and recreates the entire ASR backend (WSL Server and ASR Model)
+        to apply critical WSL settings changes.
+        """
+        uniLogger.warning(
+            "⚠️ Critical WSL setting change detected. Initiating full backend restart...")
+
+        # 1. SHUTDOWN Phase
+        if self.asrModelHandler:
+            self.asrModelHandler.cleanup()
+        if self.wslServerProcess:
+            self._terminateWslServer()
+        if self.audioHandler: self.audioHandler.stopStream()
+        if self.realTimeProcessor: self.realTimeProcessor.clearBuffer()
+
+        # 2. RE-INITIALIZE Phase
+        try:
+            self._initializeAsrHandler()
+
+            # Re-initialize Model Lifecycle Manager
+            self.modelLifecycleManager = ModelLifecycleManager(
+                self.config, self.stateManager, self.asrModelHandler, self.systemInteractionHandler
+            )
+
+            self._runInitialSetup()
+
+            uniLogger.info("✅ WSL Backend restarted successfully with new settings.")
+            self.config.wsl_restart_required = False
+
+        except Exception as e:
+            uniLogger.critical(f"❌ FAILED to restart WSL Backend! Error: {e}", excInfo=True)
+            # Flag remains True, causing retry on next loop iteration.
+
     def _cleanup(self):
         """Cleans up all resources."""
         uniLogger.info("Initiating orchestrator cleanup...")
@@ -504,6 +557,17 @@ class SpeechToTextOrchestrator:
     def _mainLoop(self):
         """The core processing loop of the orchestrator."""
         while self.stateManager.shouldProgramContinue():
+
+            # === 1. CRITICAL CHECK: WSL RESTART (HIGHEST PRIORITY) ===
+            if self.config.wsl_restart_required:
+                self._restart_wsl_backend()
+                continue
+
+            # === 2. REAL-TIME AUDIO SETTINGS CHECK (Non-critical restart) ===
+            if self.config.audio_settings_changed:
+                self._applyAudioSettings()
+
+            # === 3. Main ASR/System Loop (Existing Logic) ===
             if self.stateManager.checkProgramTimeout():
                 uniLogger.info("Program timeout reached. Stopping.")
                 break

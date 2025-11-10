@@ -2,14 +2,6 @@
 # ==============================================================================
 # Audio Input Handling and Real-Time Processing
 # ==============================================================================
-#
-# Purpose:
-# - AudioHandler: Manages audio input stream using sounddevice library.
-#   Handles device selection, stream starting/stopping, and queuing raw audio chunks.
-# - RealTimeAudioProcessor: Accumulates audio chunks, implements transcription
-#   trigger logic based on selected mode (dictation or constant interval),
-#   and prepares audio segments for the ASR handler.
-# ==============================================================================
 import queue
 import sys
 import time
@@ -70,9 +62,13 @@ class AudioHandler:
         uniLogger.info("--------------------------------------")
 
     def _setupDeviceInfo(self):
-        """Queries audio device info and sets the actual sample rate and channels in the config."""
+        """
+        [CRITICAL FOR REAL-TIME AUDIO] Queries audio device info and sets the actual sample rate and channels in the config.
+        This method re-reads the latest configuration settings to support Real-Time restarts.
+        """
         if not sounddeviceAvailable: return
         self._printAudioDevices()
+        # --- Read the LATEST configuration values from ConfigurationManager ---
         deviceId = self.config.get('deviceId')
         requestedRate = self.config.get('sampleRate', 16000)
         requestedChannels = self.config.get('channels', 1)
@@ -164,6 +160,7 @@ class AudioHandler:
         if self.stream is not None:
             self.stopStream()
         try:
+            # These parameters are read from config, so they contain the LATEST desired values.
             rate = self.config.get('actualSampleRate')
             channels = self.config.get('actualChannels')
             deviceId = self.config.get('deviceId')
@@ -215,10 +212,10 @@ class AudioHandler:
             try:
                 self.stream.stop()
                 self.stream.close()
-                uniLogger.info(f"Audio stream stopped and closed ({self.streamInfo}).")
             except Exception as e:
                 uniLogger.error(f"Error stopping/closing audio stream: {e}", excInfo=True)
             finally:
+                uniLogger.info(f"Audio stream stopped and closed ({self.streamInfo}).")
                 self.stream = None
                 self.streamInfo = {}
                 self.clearQueue()
@@ -297,7 +294,7 @@ class RealTimeAudioProcessor:
 
     def processIncomingChunk(self, audioChunk: np.ndarray) -> bool:
         """
-        Processes a new raw audio chunk: converts it to float32, ensures it's mono,
+        Processes a new raw audio chunk: converts it to float32, ensures it mono,
         updates internal state (for dictation mode), and appends it to the buffer.
         Returns:
             bool: True if the chunk was successfully processed, False otherwise.
@@ -412,7 +409,7 @@ class RealTimeAudioProcessor:
             # For constant interval, reset timer even if buffer is empty to avoid rapid triggers later
             if mode == "constantIntervalMode" and self._isConstantIntervalTimeReached():
                 self.lastTranscriptionTriggerTime = time.time()
-        return None
+            return None
 
     def _isConstantIntervalTimeReached(self) -> bool:
         """Helper method to check if the time interval for constant mode has passed."""
