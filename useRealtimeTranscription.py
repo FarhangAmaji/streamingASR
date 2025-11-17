@@ -1,151 +1,185 @@
 # useRealtimeTranscription.py
 # ==============================================================================
-# Real-Time Speech-to-Text - Main Execution Script
+# Real-Time Speech-to-Text - Main Execution Script (GUI Enabled)
 # ==============================================================================
 #
 # Purpose:
 # - This is the main entry point to run the real-time speech-to-text application.
-# - It defines the user configuration in the `userSettings` dictionary.
-# - It initializes the main `SpeechToTextOrchestrator` with the user settings.
-# - It starts the application's main loop and handles critical errors.
-#
-# To-Do / Checks:
-# - Consider a way to change user settings while the program is running.
-# - Investigate if the model unloads earlier than the specified `model_unloadTimeout`.
+# - It initializes the PyQt Application (GUI main thread).
+# - It defines the **initial default settings** in `userSettings`.
+# - It initializes the main `SpeechToTextOrchestrator` and runs it
+#   in a separate background thread.
+# - It creates and shows the `ControlPanel` GUI, connecting it to the
+#   Orchestrator's configuration object.
 # ==============================================================================
+import sys
 import traceback
-from mainManager import SpeechToTextOrchestrator
-# Import the universal logger instances directly
-from utils.loggerInstance import uniLogger, uniDebugLogger
 import logging
+from threading import Thread
 
-# --- User Configuration ---
-# Define configuration as a dictionary. Adjust these values as needed.
+# --- Qt and GUI Imports ---
+try:
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt
+except ImportError:
+    print("CRITICAL ERROR: PyQt5 not found. Please run 'pip install PyQt5'")
+    sys.exit(1)
 
-# Set the logging level for the 'transformers' library to ERROR to reduce verbose output.
+# --- Application Core Imports ---
+from mainManager import SpeechToTextOrchestrator
+from gui import ControlPanel  # Import the new GUI
+from utils.loggerInstance import uniLogger, uniDebugLogger
+
+# --- User Configuration (Initial Defaults) ---
+# These are the default values. The GUI (gui.py) will load these
+# and then allow the user to change them at runtime.
+
+# Set the logging level for 'transformers' to ERROR to reduce verbose output.
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 userSettings = {
     # --- Core Model Settings ---
-    # Choose the ASR model. Examples:
     # "modelName": "openai/whisper-large-v3",
     # "modelName": "openai/whisper-tiny",#
     "modelName": "nvidia/canary-180m-flash",
     # "modelName": "nvidia/stt_en_fastconformer_ctc_small",
-    # Remote NeMo (requires WSL server)
-    # "modelName": "openai/whisper-tiny",  # Local Whisper (smaller for quick test)
-    # Target language for transcription. 'en' for English.
     "language": "en",
-    # Force CPU usage for local models. If True, overrides automatic GPU detection for Whisper.
     "CPU": True,
 
     # --- Remote Server Settings (ONLY used if modelName starts with 'nvidia/') ---
-    # URL where the wslNemoServer.py script listens inside WSL.
-    "wslServerUrl": "http://localhost:5001",
-    # The exact name of your WSL distribution. Check with `wsl -l`.
-    "wslDistributionName": "Ubuntu",
-    # *** CHANGE THIS to your actual WSL distribution name ***
-    # Use 'sudo' to run the server script in WSL. Requires passwordless sudo configuration.
+    "wslServerUrl": "http://172.21.70.124:5001",
+    "wslDistributionName": "Ubuntu",  # *** CHANGE THIS if needed ***
     "wslUseSudo": False,
-    # Max seconds the client will wait for a response from the WSL server.
     "serverRequestTimeout": 15.0,
-    # Ask the WSL server to unload the NeMo model when this application exits.
     "unloadRemoteModelOnExit": True,
-    # Max seconds to wait for the automatically launched WSL server to become ready.
     "wslServerReadyTimeout": 90.0,
 
     # --- Transcription Mode & Settings ---
-    # "dictationMode": Transcribes after a pause.
-    # "constantIntervalMode": Transcribes at fixed time intervals.
     "transcriptionMode": "dictationMode",
-    # (dictationMode) Seconds of silence after speech to trigger transcription.
     "dictationMode_silenceDurationToOutput": 0.6,
-    # (dictationMode) Audio loudness below which is considered 'silence'.
     "dictationMode_silenceLoudnessThreshold": 0.00035,
-    # (constantIntervalMode) Interval in seconds for transcription.
     "constantIntervalMode_transcriptionInterval": 4.0,
 
     # --- Silence Skipping & Filtering ---
-    # Minimum total duration (seconds) of loud audio in a segment to be considered valid.
     "minLoudDurationForTranscription": 0.3,
-    # Average segment loudness below which extra filtering applies.
     "silenceSkip_threshold": 0.0002,
-    # If avg loudness is low, check start N seconds; if loud, keep segment.
     "skipSilence_beforeNSecSilence": 0.3,
-    # If avg loudness is low, check end N seconds; if loud, keep segment.
     "skipSilence_afterNSecSilence": 0.3,
-    # Words filtered if segment loudness is below the corresponding threshold.
     "commonFalseDetectedWords": ["you", "thank you", "bye", 'amen', 'thanks', 'okay', 'uh', 'um',
                                  'hmm'],
-    # Loudness threshold for filtering 'commonFalseDetectedWords'.
     "loudnessThresholdOf_commonFalseDetectedWords": 0.00065,
-    # Words/phrases always removed from transcription (case-insensitive).
     "bannedWords": ["<|endoftext|>"],
 
     # --- General Behavior ---
-    # Remove trailing ellipsis (...) or periods (.) from ASR output.
     "removeTrailingDots": True,
-    # Initial state of text output (typing/clipboard).
     "outputEnabled": False,
-    # Start microphone recording immediately on launch.
     "isRecordingActive": True,
-    # Enable audio feedback sounds (e.g., for recording start/stop).
     "enableAudioNotifications": True,
-    # Play sounds for 'Recording ON' and 'Output ENABLED' events.
     "playEnableSounds": False,
-    # Master switch for text output action (typing/clipboard).
     "enableTypingOutput": True,
-    # "letter": Types char by char. "word": Types word by word. "whole": Pastes entire block.
     "typingMode": "whole",
 
     # --- Hotkeys ---
-    # Global key combinations to control the application.
-    "recordingToggleKey": "windows+alt+l",  # Toggle microphone recording.
-    "outputToggleKey": "ctrl+q",  # Toggle text output.
-    "forceTranscriptionKey": "ctrl+.",  # Force transcription of the current audio buffer.
+    "recordingToggleKey": "windows+alt+l",
+    "outputToggleKey": "ctrl+q",
+    "forceTranscriptionKey": "ctrl+.",
 
     # --- Timeouts (0 to disable) ---
-    # Max duration (seconds) for a single continuous recording session.
     "maxDurationRecording": 0,
-    # Max duration (seconds) the entire application will run.
     "maxDurationProgramActive": 0,
-    # Seconds of inactivity before automatically unloading the ASR model to save VRAM.
     "model_unloadTimeout": 60 * 10,  # 10 minutes
-    # Seconds of consecutive silence (while recording) before auto-stopping recording.
     "consecutiveIdleTime": 60 * 2,  # 2 minutes
 
     # --- Audio Settings ---
-    # Sample rate in Hz (16000 is standard for Whisper/NeMo).
     "sampleRate": 16000,
-    # Number of audio channels (1 for mono).
     "channels": 1,
-    # Audio chunk size in samples. Affects latency.
     "blockSize": 1024,
-    # Audio input device ID. None for system default. Run `python -m sounddevice` to list devices.
-    "deviceId": None,
+    "deviceId": None,  # 'None' for default, GUI will load this
 }
 
-# --- Instantiate and Run Orchestrator ---.
-orchestrator = None
-try:
-    # Initialize the main application orchestrator with the defined settings.
-    uniLogger.info("Initializing application...")
-    orchestrator = SpeechToTextOrchestrator(**userSettings)
-    # Start the main application loop. This will block until the program exits.
-    uniLogger.info("Starting application run loop...")
-    orchestrator.run()
-except ValueError as e:  # Catch specific configuration errors
-    uniLogger.critical(f"!!! CONFIGURATION ERROR: {e}", excInfo=True)
-    uniLogger.error("Please check the 'userSettings' dictionary in useRealtimeTranscription.py.")
-except ImportError as e:  # Catch errors from missing libraries
-    uniLogger.critical(f"!!! IMPORT ERROR: {e}", excInfo=True)
-    uniLogger.error("Please ensure all required libraries are installed correctly.")
-except Exception as e:  # Catch any other unexpected errors during setup or runtime
-    uniLogger.critical(f"!!! PROGRAM CRITICAL ERROR: {e}", excInfo=True)
-finally:
-    # This block executes after the main loop finishes, either normally or due to an error.
-    uniLogger.info("Application (useRealtimeTranscription) has stopped.")
-    # The orchestrator's run() method has its own internal finally block for resource cleanup.
 
-# Final confirmation print outside the logging system to indicate the script has finished.
-print("Exiting useRealtimeTranscription.py script.")
+def main():
+    """
+    Main execution function.
+    Initializes the Qt Application, the ASR Orchestrator (in a thread),
+    and the Control Panel GUI.
+    """
+    orchestrator = None
+    orchestrator_thread = None
+
+    try:
+        # 1. Initialize the Qt Application (MUST be first)
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        app = QApplication(sys.argv)
+        uniLogger.info("QApplication initialized (Main Thread).")
+
+        # 2. Initialize the main application orchestrator
+        # This creates the object but does NOT start its blocking .run() method yet.
+        uniLogger.info("Initializing application orchestrator...")
+        orchestrator = SpeechToTextOrchestrator(**userSettings)
+
+        # 3. Initialize the GUI Control Panel
+        # We pass the orchestrator's 'config' and 'audioHandler' objects
+        # to the GUI. The GUI can now call config.set() and audioHandler.listAudioDevices().
+        uniLogger.info("Initializing Control Panel GUI...")
+
+        # Check if audioHandler was initialized (it might not be if error)
+        if not orchestrator.audioHandler:
+            uniLogger.critical("AudioHandler failed to initialize. GUI cannot list devices.")
+            # We can still proceed, but the device list will be empty/fallback
+
+        control_panel = ControlPanel(
+            config=orchestrator.config,
+            audio_handler=orchestrator.audioHandler
+            # Pass the *actual* audioHandler instance
+        )
+        control_panel.show()
+
+        # 4. Start the main application loop (orchestrator.run())
+        # This MUST be done in a separate thread so the GUI (app.exec_())
+        # does not block.
+        orchestrator_thread = Thread(
+            target=orchestrator.run,
+            name="OrchestratorThread",
+            daemon=True  # 'daemon=True' ensures thread exits when main script exits
+        )
+        orchestrator_thread.start()
+        uniLogger.info(
+            "Starting application run loop in a background thread...")
+
+        # 5. Start the Qt event loop (THIS IS A BLOCKING CALL)
+        # This runs the GUI, handles button clicks, etc.
+        # When the GUI window is closed, app.exec_() will return.
+        uniLogger.info("Starting Qt event loop (GUI)...")
+        exit_code = app.exec_()
+        uniLogger.info(f"Qt event loop finished with exit code {exit_code}.")
+
+    except ValueError as e:
+        uniLogger.critical(f"!!! CONFIGURATION ERROR: {e}", excInfo=True)
+    except ImportError as e:
+        uniLogger.critical(f"!!! IMPORT ERROR: {e}", excInfo=True)
+    except Exception as e:
+        uniLogger.critical(f"!!! PROGRAM CRITICAL ERROR: {e}", excInfo=True)
+    finally:
+        # This block executes after the Qt loop finishes (e.g., GUI closed).
+        uniLogger.info(
+            "Application (useRealtimeTranscription) is stopping...")
+        if orchestrator and orchestrator.stateManager:
+            # Signal the orchestrator's thread to stop
+            uniLogger.info("Requesting orchestrator shutdown...")
+            orchestrator.stateManager.stopProgram()
+
+        # Wait for the orchestrator thread to finish its cleanup
+        if orchestrator_thread and orchestrator_thread.is_alive():
+            uniLogger.info("Waiting for orchestrator thread to join...")
+            orchestrator_thread.join(timeout=5.0)
+            if orchestrator_thread.is_alive():
+                uniLogger.warning("Orchestrator thread did not exit cleanly.")
+
+    # Final confirmation print
+    print("Exiting useRealtimeTranscription.py script.")
+
+
+# --- Script Entry Point ---
+if __name__ == "__main__":
+    main()

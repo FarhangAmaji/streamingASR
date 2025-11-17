@@ -177,18 +177,38 @@ class SpeechToTextOrchestrator:
             if not wslServerPort:
                 raise ValueError(f"Could not extract port from wslServerUrl: {wslServerUrl}")
 
-            commandBase = ["wsl.exe", "-d", wslDistro, "--"]
+            # ==================================
+            # === CODE FIX FOR PYTHONPATH ===
+            # ==================================
+            # --- NEW: More robust command execution ---
+            # We will use 'bash -c' to run a complex command string.
+            # This string tells bash to:
+            # 1. 'cd' into the project directory *inside* WSL
+            # 2. Set the PYTHONPATH to the current directory ($PWD)
+            # 3. *Then* execute python3 with all arguments
 
-            commandInsideWsl = ["env", f"PYTHONPATH={project_root_wsl}", "/usr/bin/python3",
-                                wslServerScriptPathWsl, "--model_name",
-                                modelName, "--port", str(wslServerPort), "--load_on_start"]
+            # Note: We must be careful with quotes for paths and model names
+            wsl_command_string = (
+                f"cd '{project_root_wsl}' && "
+                f"PYTHONPATH=$PWD /usr/bin/python3 '{wslServerScriptPathWsl}' "
+                f"--model_name '{modelName}' --port {wslServerPort} --load_on_start"
+            )
+
+            commandBase = ["wsl.exe", "-d", wslDistro, "--"]
 
             if useSudo:
                 uniLogger.warning(
                     "Config 'wslUseSudo' is True. This requires passwordless sudo in WSL.")
-                commandInsideWsl.insert(2, "sudo")
+                # Insert 'sudo' before the bash command
+                commandInsideWsl = ["sudo", "bash", "-c", wsl_command_string]
+            else:
+                commandInsideWsl = ["bash", "-c", wsl_command_string]
 
             self.wslLaunchCommand = commandBase + commandInsideWsl
+            # ==================================
+            # === END OF CODE FIX ===
+            # ==================================
+
             uniLogger.info("Prepared WSL server launch command successfully.")
             uniDebugLogger.debug(f"WSL Command List: {self.wslLaunchCommand}")
 
@@ -288,17 +308,18 @@ class SpeechToTextOrchestrator:
         """Polls the WSL server's /status endpoint until it responds successfully or a timeout occurs."""
         startTime = time.time()
         if not isinstance(self.asrModelHandler,
-                          RemoteNemoClientHandler) or not self.wslServerProcess:
+                          RemoteNemoClientHandler):
             uniLogger.error(
-                "Cannot wait for server: Incorrect ASR handler or no WSL process handle.")
+                "Cannot wait for server: Incorrect ASR handler.")
             return False
 
-        pid = self.wslServerProcess.pid or "N/A"
+        # Handle case where process may not have been started (e.g., manual launch)
+        pid = self.wslServerProcess.pid if self.wslServerProcess else "N/A (Manual?)"
         uniDebugLogger.debug(
             f"Waiting up to {timeoutSeconds:.1f}s for server (PID: {pid}) to become reachable...")
 
         while time.time() - startTime < timeoutSeconds:
-            if checkProcessFirst and self.wslServerProcess.poll() is not None:
+            if checkProcessFirst and self.wslServerProcess and self.wslServerProcess.poll() is not None:
                 uniLogger.error(
                     f"WSL server process (PID: {pid}) exited prematurely (code: {self.wslServerProcess.returncode}).")
                 self._logWslProcessOutputOnError()
@@ -331,6 +352,9 @@ class SpeechToTextOrchestrator:
                 if "Address already in use" in stdoutData:
                     uniLogger.error(
                         "!!! Detected 'Address already in use'. Check port in WSL.")
+                if "ModuleNotFoundError: No module named 'utils'" in stdoutData:
+                    uniLogger.error(
+                        "!!! Detected 'ModuleNotFoundError: No module named 'utils''. PYTHONPATH is likely incorrect.")
         except Exception as readError:
             uniLogger.warning(f"Exception reading WSL process output for PID {pid}: {readError}")
 
@@ -450,25 +474,26 @@ class SpeechToTextOrchestrator:
         """Applies non-critical audio settings changes by restarting the audio stream."""
         newRate = self.config.get('sampleRate')
         newChannels = self.config.get('channels')
+        # We also check deviceId now
+        newDeviceId = self.config.get('deviceId')
 
         currentRate = self.config.get('actualSampleRate')
         currentChannels = self.config.get('actualChannels')
+        # We need to know the *actual* current deviceId, which isn't stored separately.
+        # We rely on the config.set() logic: if 'deviceId' changed, the flag is set.
 
-        if currentRate != newRate or currentChannels != newChannels:
-            uniLogger.info(
-                f"Applying Real-time Audio Settings: Rate {currentRate}->{newRate}, Channels {currentChannels}->{newChannels}")
-            if self.audioHandler:
-                self.audioHandler.stopStream()
-                # Re-setup device info (will read new values from self.config)
-                self.audioHandler._setupDeviceInfo()
-                if self.stateManager and self.stateManager.isRecording():
-                    self.audioHandler.startStream()
+        # We only need to restart if the flag is set.
+        # The main loop checks the flag, not this function.
+        uniLogger.info(
+            f"Applying Real-time Audio Settings: Rate {currentRate}->{newRate}, Channels {currentChannels}->{newChannels}, Device->{newDeviceId}")
+        if self.audioHandler:
+            self.audioHandler.stopStream()
+            # Re-setup device info (will read new values from self.config)
+            self.audioHandler._setupDeviceInfo()
+            if self.stateManager and self.stateManager.isRecording():
+                self.audioHandler.startStream()
 
-            # Update internal actual values (ensures consistency)
-            self.config.set('actualSampleRate', newRate)
-            self.config.set('actualChannels', newChannels)
-
-        self.config.audio_settings_changed = False
+        self.config.audio_settings_changed = False  # Reset the flag
         uniLogger.info("Real-time Audio Settings applied successfully.")
 
     # --- NEW REAL-TIME WSL SETTINGS LOGIC ---
@@ -490,14 +515,15 @@ class SpeechToTextOrchestrator:
 
         # 2. RE-INITIALIZE Phase
         try:
-            self._initializeAsrHandler()
+            self._initializeAsrHandler()  # This calls _prepareWslLaunchCommand with new config
 
             # Re-initialize Model Lifecycle Manager
             self.modelLifecycleManager = ModelLifecycleManager(
                 self.config, self.stateManager, self.asrModelHandler, self.systemInteractionHandler
             )
 
-            self._runInitialSetup()
+            # Re-run setup sequence (launch WSL, load model, start audio)
+            self._runInitialSetup(is_restart=True)
 
             uniLogger.info("✅ WSL Backend restarted successfully with new settings.")
             self.config.wsl_restart_required = False
@@ -525,18 +551,24 @@ class SpeechToTextOrchestrator:
             if t.is_alive(): t.join(timeout=2.0)
         uniLogger.info("Cleanup complete.")
 
-    def _runInitialSetup(self):
+    def _runInitialSetup(self, is_restart: bool = False):
         """Handles the initial setup sequence."""
-        uniLogger.info("Running initial setup...")
+        if not is_restart:
+            uniLogger.info("Running initial setup...")
+
         serverReachable = True
         if isinstance(self.asrModelHandler, RemoteNemoClientHandler):
-            uniLogger.info("Remote handler detected, checking WSL server...")
+            if not is_restart:
+                uniLogger.info("Remote handler detected, checking WSL server...")
+
             serverReachable = self._launchWslServer()
             if not serverReachable:
                 uniLogger.error("WSL NeMo server check failed.")
 
         if serverReachable:
-            uniLogger.info("Attempting initial ASR model load...")
+            if not is_restart:
+                uniLogger.info("Attempting initial ASR model load...")
+
             if not self.asrModelHandler.loadModel():
                 uniLogger.error("Initial ASR model load failed.")
                 if isinstance(self.asrModelHandler, WhisperModelHandler):
@@ -544,66 +576,84 @@ class SpeechToTextOrchestrator:
                     self.stateManager.stopProgram()
                     return
 
-        if self.stateManager.shouldProgramContinue():
+        # Don't restart threads if they are already running from the first setup
+        if not is_restart and self.stateManager.shouldProgramContinue():
             self._startBackgroundThreads()
 
         if self.stateManager.isRecording() and self.stateManager.shouldProgramContinue():
-            uniLogger.info("Initial state is recording, starting audio stream...")
+            if not is_restart:
+                uniLogger.info("Initial state is recording, starting audio stream...")
+            else:
+                uniLogger.info("Restarting audio stream...")
+
             if not self.audioHandler.startStream():
-                uniLogger.critical("Failed to start audio stream initially. Disabling recording.")
+                uniLogger.critical("Failed to start/restart audio stream. Disabling recording.")
                 self.stateManager.stopRecording()
-        uniLogger.info("Initial setup phase complete.")
+
+        if not is_restart:
+            uniLogger.info("Initial setup phase complete.")
+        else:
+            uniLogger.info("Restart setup phase complete.")
 
     def _mainLoop(self):
         """The core processing loop of the orchestrator."""
         while self.stateManager.shouldProgramContinue():
 
-            # === 1. CRITICAL CHECK: WSL RESTART (HIGHEST PRIORITY) ===
-            if self.config.wsl_restart_required:
-                self._restart_wsl_backend()
-                continue
+            try:
+                # === 1. CRITICAL CHECK: WSL RESTART (HIGHEST PRIORITY) ===
+                if self.config.wsl_restart_required:
+                    self._restart_wsl_backend()
+                    continue  # Restart loop to ensure all states are fresh
 
-            # === 2. REAL-TIME AUDIO SETTINGS CHECK (Non-critical restart) ===
-            if self.config.audio_settings_changed:
-                self._applyAudioSettings()
+                # === 2. REAL-TIME AUDIO SETTINGS CHECK (Non-critical restart) ===
+                if self.config.audio_settings_changed:
+                    self._applyAudioSettings()
+                    # Flag is reset inside _applyAudioSettings
 
-            # === 3. Main ASR/System Loop (Existing Logic) ===
-            if self.stateManager.checkProgramTimeout():
-                uniLogger.info("Program timeout reached. Stopping.")
-                break
+                # === 3. Main ASR/System Loop (Existing Logic) ===
+                if self.stateManager.checkProgramTimeout():
+                    uniLogger.info("Program timeout reached. Stopping.")
+                    break
 
-            self.realTimeProcessor.clearBufferIfOutputDisabled()
-            if self.stateManager.isRecording():
-                if self.stateManager.checkRecordingTimeout() or self.stateManager.checkIdleTimeout():
-                    uniLogger.info("A recording timeout was reached. Stopping recording.")
-                    self.toggleRecording()
+                self.realTimeProcessor.clearBufferIfOutputDisabled()
+                if self.stateManager.isRecording():
+                    if self.stateManager.checkRecordingTimeout() or self.stateManager.checkIdleTimeout():
+                        uniLogger.info("A recording timeout was reached. Stopping recording.")
+                        self.toggleRecording()
 
-            shouldRecord = self.stateManager.isRecording()
-            isStreamActive = self.audioHandler.stream is not None and self.audioHandler.stream.active
-            if shouldRecord and not isStreamActive:
-                if not self.audioHandler.startStream():
-                    uniLogger.error("Failed to restart audio stream. Disabling recording.")
-                    self.stateManager.stopRecording()
-            elif not shouldRecord and isStreamActive:
-                self.audioHandler.stopStream()
+                shouldRecord = self.stateManager.isRecording()
+                isStreamActive = self.audioHandler.stream is not None and self.audioHandler.stream.active
+                if shouldRecord and not isStreamActive:
+                    if not self.audioHandler.startStream():
+                        uniLogger.error("Failed to restart audio stream. Disabling recording.")
+                        self.stateManager.stopRecording()
+                elif not shouldRecord and isStreamActive:
+                    self.audioHandler.stopStream()
 
-            if self.stateManager.isRecording():
-                maxChunks = 50
-                for _ in range(maxChunks):
-                    chunk = self.audioHandler.getAudioChunk()
-                    if chunk is None: break
-                    self.realTimeProcessor.processIncomingChunk(chunk)
+                if self.stateManager.isRecording():
+                    maxChunks = 50
+                    for _ in range(maxChunks):
+                        chunk = self.audioHandler.getAudioChunk()
+                        if chunk is None: break
+                        self.realTimeProcessor.processIncomingChunk(chunk)
 
-            if self.stateManager.isOutputEnabled():
-                audioToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
-                if audioToTranscribe is not None and audioToTranscribe.size > 0:
-                    try:
-                        self.transcriptionRequestQueue.put(
-                            (audioToTranscribe, self.config.get('actualSampleRate')), timeout=0.5)
-                    except queue.Full:
-                        uniLogger.warning("Transcription queue is full. Audio segment dropped.")
+                if self.stateManager.isOutputEnabled():
+                    audioToTranscribe = self.realTimeProcessor.checkTranscriptionTrigger()
+                    if audioToTranscribe is not None and audioToTranscribe.size > 0:
+                        try:
+                            self.transcriptionRequestQueue.put(
+                                (audioToTranscribe, self.config.get('actualSampleRate')),
+                                timeout=0.5)
+                        except queue.Full:
+                            uniLogger.warning("Transcription queue is full. Audio segment dropped.")
 
-            time.sleep(0.01)
+                time.sleep(0.01)  # Main loop sleep
+
+            except Exception as loopError:
+                uniLogger.critical(f"!!! CRITICAL UNHANDLED ERROR IN MAIN LOOP: {loopError}",
+                                   excInfo=True)
+                uniLogger.error("Attempting to recover, but the application may be unstable.")
+                time.sleep(1.0)  # Prevent rapid-fire loop crashes
 
     def run(self):
         """Main execution entry point that wraps the setup and main loop."""
@@ -616,8 +666,10 @@ class SpeechToTextOrchestrator:
         except KeyboardInterrupt:
             uniLogger.info("\nKeyboardInterrupt received. Stopping application...")
         except Exception as e:
-            uniLogger.critical(f"\n!!! CRITICAL UNHANDLED ERROR IN MAIN LOOP: {e}", excInfo=True)
+            # This catch is for errors *during setup* (e.g., _runInitialSetup)
+            uniLogger.critical(f"\n!!! CRITICAL UNHANDLED ERROR DURING SETUP: {e}", excInfo=True)
         finally:
+            # Cleanup is called whether setup or mainloop fails
             if self.stateManager: self.stateManager.stopProgram()
             uniLogger.info("Exiting main loop.")
             self._cleanup()

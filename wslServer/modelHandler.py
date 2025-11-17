@@ -1,13 +1,6 @@
 # wsl_server/model_handler.py
 # ==============================================================================
-# NeMo ASR Model Handler for WSL Server
-# ==============================================================================
-#
-# Purpose:
-# - Contains the NemoServerModelHandler class.
-# - This class is responsible for the entire lifecycle of the NeMo ASR model:
-#   loading, unloading, cleaning memory, and performing transcription.
-# - It is designed to be used by the Flask server application.
+# NeMo ASR Model Handler for WSL Server (UPDATED & FIXED)
 # ==============================================================================
 import gc
 import time
@@ -17,16 +10,7 @@ from utils.loggerInstance import uniLogger, uniDebugLogger
 
 
 class NemoServerModelHandler:
-    """
-    Manages the NeMo ASR model lifecycle and transcription within the server.
-    """
-
     def __init__(self, targetModelName):
-        """
-        Initializes the model handler with the target model name and determines the compute device.
-        Args:
-            targetModelName (str): The name of the NeMo model to be managed (e.g., 'nvidia/canary-180m-flash').
-        """
         self.targetModelName = targetModelName
         self.model = None
         self.modelLoaded = False
@@ -38,7 +22,6 @@ class NemoServerModelHandler:
             f"NemoServerModelHandler initialized for model: {self.targetModelName} on device {self.device}")
 
     def _determineDevice(self):
-        """Determines the compute device (CUDA GPU or CPU) for NeMo."""
         if torch.cuda.is_available():
             self.device = torch.device('cuda')
             gpuName = torch.cuda.get_device_name(self.device)
@@ -49,7 +32,6 @@ class NemoServerModelHandler:
             uniLogger.warning("Running NeMo models on CPU can be very slow.")
 
     def _cudaClean(self):
-        """Performs garbage collection and attempts to clear PyTorch's CUDA cache."""
         uniDebugLogger.debug("Cleaning CUDA memory (NeMo Server)...")
         gc.collect()
         if self.device and self.device.type == 'cuda':
@@ -60,11 +42,6 @@ class NemoServerModelHandler:
                 uniLogger.warning(f"CUDA memory cleaning failed: {e}")
 
     def loadModel(self) -> bool:
-        """
-        Imports NeMo dynamically and loads the ASR model from pretrained weights.
-        Returns:
-            bool: True on success, False on failure.
-        """
         if self.loadInProgress:
             uniLogger.warning("Load request ignored: load already in progress.")
             return False
@@ -113,11 +90,6 @@ class NemoServerModelHandler:
             self.loadInProgress = False
 
     def unloadModel(self) -> bool:
-        """
-        Unloads the NeMo ASR model and frees up memory.
-        Returns:
-            bool: True if successful or already unloaded, False on error.
-        """
         if not self.modelLoaded:
             uniLogger.info("NeMo model already unloaded.")
             return True
@@ -136,15 +108,6 @@ class NemoServerModelHandler:
             return False
 
     def transcribeAudioData(self, audioDataBytes, sampleRate, targetLang) -> str | None:
-        """
-        Transcribes audio data received as bytes using the loaded NeMo model.
-        Args:
-            audioDataBytes (bytes): The raw audio data.
-            sampleRate (int): The sample rate of the audio.
-            targetLang (str): The target language for transcription.
-        Returns:
-            str | None: The transcribed text, an empty string for silence, or None on critical failure.
-        """
         if not self.modelLoaded or self.model is None:
             uniLogger.error("Transcription skipped - Model not loaded.")
             return None
@@ -169,16 +132,34 @@ class NemoServerModelHandler:
 
                 transcriptionResults = self.model.transcribe(**kwargs)
 
-            # Add a log to see the raw result from the model
-            uniLogger.info(f"Transcription Result from NeMo: '{transcriptionResults}'")
+            # --- LOGGING FOR DEBUGGING ---
+            # These logs prove that the new code is running
+            uniLogger.info(f"Raw NeMo Result Type: {type(transcriptionResults)}")
 
-            # Process the model's output to get the final text
-            if transcriptionResults and isinstance(transcriptionResults[0], (str, list)):
-                result_text = transcriptionResults[0]
-                if isinstance(result_text, list):
-                    result_text = result_text[0]
-                return result_text.strip()
-            return ""  # Return empty string if transcription is empty
+            # --- SMART TEXT EXTRACTION ---
+            final_text = ""
+            if transcriptionResults:
+                first_item = transcriptionResults[0]
+
+                # Case 1: Output is a simple string (Older models)
+                if isinstance(first_item, str):
+                    final_text = first_item
+
+                # Case 2: Output is a list/Hypothesis object (Newer models like Canary)
+                # We check if it has a 'text' attribute
+                elif hasattr(first_item, 'text'):
+                    final_text = first_item.text
+
+                # Case 3: Fallback - try converting to string directly
+                else:
+                    uniLogger.warning(
+                        f"Unknown result item type: {type(first_item)}. Converting to str.")
+                    final_text = str(first_item)
+
+            final_text = final_text.strip()
+            uniLogger.info(f"Extracted Final Text: '{final_text}'")
+            return final_text
+
         except Exception as e:
             uniLogger.error(f"Error during transcription: {e}", excInfo=True)
             return None

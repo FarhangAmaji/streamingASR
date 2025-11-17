@@ -61,6 +61,43 @@ class AudioHandler:
             uniLogger.error(f"Could not query audio devices: {e}", excInfo=True)
         uniLogger.info("--------------------------------------")
 
+    # ==============================================================================
+    # === REVISED METHOD FOR GUI ===
+    # ==============================================================================
+    def listAudioDevices(self) -> dict:
+        """
+        Gets a dictionary of all available INPUT audio devices.
+        This is called by the GUI to populate the dropdown menu.
+
+        Returns:
+            dict: A dictionary of {index: "Device Name (HostAPI)}
+        """
+        if not sounddeviceAvailable:
+            uniLogger.warning("Cannot list audio devices: sounddevice not available.")
+            return {}
+        try:
+            devices = sd.query_devices()  # This returns a DeviceList
+            input_devices = {}
+            if not devices:
+                return {}
+
+            # FIX: Iterate directly over the DeviceList (it's not a real list)
+            for index, device_info in enumerate(devices):
+                if isinstance(device_info, dict) and device_info.get('max_input_channels', 0) > 0:
+                    device_name = device_info.get('name', f'Device {index}')
+                    host_api = device_info.get('hostapi', 'N/A')
+                    friendly_name = f"{device_name} ({host_api})"
+                    input_devices[index] = friendly_name
+
+            return input_devices
+        except Exception as e:
+            uniLogger.error(f"Could not query audio devices for GUI: {e}", excInfo=True)
+            return {}
+
+    # ==============================================================================
+    # === END OF REVISED METHOD ===
+    # ==============================================================================
+
     def _setupDeviceInfo(self):
         """
         [CRITICAL FOR REAL-TIME AUDIO] Queries audio device info and sets the actual sample rate and channels in the config.
@@ -294,7 +331,7 @@ class RealTimeAudioProcessor:
 
     def processIncomingChunk(self, audioChunk: np.ndarray) -> bool:
         """
-        Processes a new raw audio chunk: converts it to float32, ensures it mono,
+        Processes a new raw audio chunk: converts it to float32, ensures its mono,
         updates internal state (for dictation mode), and appends it to the buffer.
         Returns:
             bool: True if the chunk was successfully processed, False otherwise.
