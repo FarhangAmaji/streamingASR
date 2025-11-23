@@ -47,7 +47,7 @@ userSettings = {
     "CPU": True,
 
     # --- Remote Server Settings (ONLY used if modelName starts with 'nvidia/') ---
-    "wslServerUrl": "http://172.21.70.124:5001",
+    "wslServerUrl": "http://172.21.73.28:5001",
     "wslDistributionName": "Ubuntu",  # *** CHANGE THIS if needed ***
     "wslUseSudo": False,
     "serverRequestTimeout": 15.0,
